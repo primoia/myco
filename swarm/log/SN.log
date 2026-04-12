@@ -1,0 +1,5 @@
+2026-04-11T10:22:10 SN start webhook.incoming
+2026-04-11T10:22:20 SN need IAM.auth.v2
+2026-04-11T10:22:21 SN need SM.api.messages
+2026-04-11T10:22:22 SN block esperando IAM.auth.v2 e SM.api.messages
+2026-04-11T10:23:55 SN ask DIRECTOR usar retry exponencial ou fila morta

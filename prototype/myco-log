@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# myco-log - helper for sessions to append events to their own log
+#
+# Usage: myco-log <verb> <object> [detail...]
+#
+# Requires env vars:
+#   MYCO_SESSION - session id (e.g., SN, SM, IAM, DIRECTOR)
+#   MYCO_SWARM   - path to swarm dir (default: /mnt/ramdisk/myco)
+
+set -eu
+
+: "${MYCO_SESSION:?MYCO_SESSION env var required}"
+SWARM="${MYCO_SWARM:-/mnt/ramdisk/myco}"
+LOG_DIR="$SWARM/log"
+LOG_FILE="$LOG_DIR/$MYCO_SESSION.log"
+
+mkdir -p "$LOG_DIR"
+
+if [ $# -lt 2 ]; then
+    echo "usage: myco-log <verb> <object> [detail...]" >&2
+    echo "verbs: start done need block up down direct ask note" >&2
+    exit 2
+fi
+
+verb="$1"
+obj="$2"
+shift 2
+detail="$*"
+
+# ISO 8601 with millisecond precision
+ts=$(date -Iseconds)
+
+# Append atomically (Linux guarantees atomicity for O_APPEND writes < PIPE_BUF)
+if [ -n "$detail" ]; then
+    printf '%s %s %s %s %s\n' "$ts" "$MYCO_SESSION" "$verb" "$obj" "$detail" >> "$LOG_FILE"
+else
+    printf '%s %s %s %s\n' "$ts" "$MYCO_SESSION" "$verb" "$obj" >> "$LOG_FILE"
+fi

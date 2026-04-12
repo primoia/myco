@@ -1,0 +1,5 @@
+2026-04-11T10:22:00 IAM start auth.v2
+2026-04-11T10:22:15 IAM up container iam-db
+2026-04-11T10:23:00 IAM note implementando JWT HS256
+2026-04-11T10:23:20 IAM done auth.v2
+2026-04-11T10:23:21 IAM up endpoint /auth/validate

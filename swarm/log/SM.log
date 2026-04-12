@@ -1,0 +1,6 @@
+2026-04-11T10:22:30 SM start api.messages
+2026-04-11T10:22:45 SM need IAM.auth.v2
+2026-04-11T10:22:46 SM block esperando IAM.auth.v2
+2026-04-11T10:23:22 SM start api.messages
+2026-04-11T10:23:50 SM done api.messages
+2026-04-11T10:23:51 SM up endpoint /messages

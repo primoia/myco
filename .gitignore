@@ -1,0 +1,29 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Runtime data (quando myco estiver rodando, logs e views de uso real)
+# Note: os exemplos em swarm/ SÃO commitados para documentação
+/tmp/
+*.pid
+*.sock
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Claude Code per-user overrides (settings.json é commitado)
+.claude/settings.local.json
+.claude/.credentials*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db

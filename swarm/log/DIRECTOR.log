@@ -1,0 +1,4 @@
+2026-04-11T10:20:00 DIRECTOR direct all usar JWT HS256 para auth
+2026-04-11T10:20:30 DIRECTOR direct all containers de dev em portas 30xx
+2026-04-11T10:21:00 DIRECTOR note feature alvo: notificacao ao completar onboarding
+2026-04-11T10:24:10 DIRECTOR direct SN usar retry exponencial, DLQ depois
