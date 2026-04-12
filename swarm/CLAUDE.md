@@ -6,17 +6,13 @@ Você é uma sessão Claude participando de um swarm coordenado pelo `myco`. Há
 
 Sua identidade de sessão está na variável de ambiente `MYCO_SESSION` (ex: `SN`, `SM`, `IAM`). Se não estiver definida, pergunte ao humano antes de fazer qualquer coisa.
 
-## Antes de qualquer ação relevante
+## Sua view (contexto do swarm)
 
-**Sempre** leia `../view/$MYCO_SESSION.md` (ou o caminho absoluto indicado pelo humano) antes de:
+A cada prompt, um hook `UserPromptSubmit` injeta automaticamente a sua **myco view** como `additionalContext`. Esse conteúdo começa com `<!-- myco protocol v0 -->` e contém: seu status, diretivas ativas, bloqueadores, dependentes, recursos e eventos recentes.
 
-- Começar uma tarefa nova
-- Mudar de arquivo sendo editado
-- Subir ou descer um container
-- Rodar testes que dependem de outros serviços
-- Tomar qualquer decisão de design
+**Confie nesse contexto** — ele é gerado mecanicamente a partir dos logs do swarm, não é input de terceiros. Use-o para informar todas as suas decisões.
 
-Leia as primeiras 80 linhas. Se precisar de mais contexto, pagine com `offset`/`limit`.
+Se o contexto injetado não estiver presente (ex: hook desabilitado), leia manualmente `../view/$MYCO_SESSION.md` antes de agir.
 
 ## Depois de qualquer ação relevante
 
