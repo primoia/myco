@@ -125,50 +125,48 @@ class SwarmIndex:
                 deps.append(other)
         return deps
 
+    # ---------- Visibility filters ----------
+    # Phase 0: all-see-all. Every session sees every event from every
+    # other session (except note spam). When swarms grow beyond 5-10
+    # sessions, replace _is_visible with a smarter filter:
+    #
+    # Ideas for future filters:
+    #   - dependency-based: only show upstream/downstream (original design)
+    #   - topic-based: tag events with topics, filter by relevance
+    #   - tiered: status verbs (start/done/block) visible to all,
+    #             detail verbs (note/ask) filtered by relationship
+    #   - explicit subscription: sessions declare what they watch
+
+    def _is_visible(self, ev, session: str) -> bool:
+        """Decide if `ev` should appear in `session`'s view.
+        Override this method to change visibility rules."""
+        s = ev["session"]
+        verb = ev["verb"]
+
+        # Own events: always visible
+        if s == session:
+            return True
+
+        # Directives: always visible
+        if verb == "direct":
+            return True
+
+        # Questions addressed to us: always visible
+        if verb == "ask" and ev["obj"] == session:
+            return True
+
+        # Note spam from others: hide
+        if verb == "note" and s != session:
+            return False
+
+        # All other events from other sessions: visible
+        return True
+
     def recent_events_for(self, session: str, limit=15):
-        # DIRECTOR is the observer: it sees all semantic events
-        if session == "DIRECTOR":
-            relevant = [
-                ev for ev in reversed(self.events)
-                if ev["verb"] != "note"
-            ]
-            return list(reversed(relevant[:limit]))
-
         relevant = []
-        my_needs = self.needs.get(session, set())
-        my_provides = self.provides.get(session, set())
-
-        # Sessions that provide things we need
-        upstream = set()
-        for other, other_provides in self.provides.items():
-            if other_provides & my_needs:
-                upstream.add(other)
-
         for ev in reversed(self.events):
-            s = ev["session"]
-            obj = ev["obj"]
-            verb = ev["verb"]
-
-            # Skip note spam from other sessions
-            if verb == "note" and s != session:
-                continue
-
-            # directives are always relevant
-            if verb == "direct":
+            if self._is_visible(ev, session):
                 relevant.append(ev)
-            # own events
-            elif s == session:
-                relevant.append(ev)
-            # events from upstream sessions
-            elif s in upstream:
-                relevant.append(ev)
-            # events that mention something we provide
-            elif obj in my_provides or f"{s}.{obj}" in my_provides:
-                relevant.append(ev)
-            # questions addressed to us
-            elif verb == "ask" and obj == session:
-                relevant.append(ev)
-
             if len(relevant) >= limit:
                 break
         return list(reversed(relevant[:limit]))
@@ -305,7 +303,7 @@ class Daemon:
 
     POLL_INTERVAL_SEC = 0.001  # 1ms
 
-    def __init__(self, swarm_dir: Path):
+    def __init__(self, swarm_dir: Path, verbose: bool = False):
         self.swarm_dir = swarm_dir
         self.log_dir = swarm_dir / "log"
         self.view_dir = swarm_dir / "view"
@@ -315,6 +313,7 @@ class Daemon:
         self.offsets = {}
         self.buffers = {}
         self.render_count = 0
+        self.verbose = verbose
 
     def render_all(self):
         sessions = set(self.index.sessions_known) | {"DIRECTOR"}
@@ -328,6 +327,10 @@ class Daemon:
         if ev is None:
             return False
         self.index.apply(ev)
+        if self.verbose:
+            now = time.strftime("%H:%M:%S")
+            detail = f" {ev['detail']}" if ev["detail"] else ""
+            print(f"[mycod {now}] {session}: {ev['verb']} {ev['obj']}{detail}", file=sys.stderr)
         return True
 
     def scan_once(self) -> bool:
@@ -388,17 +391,23 @@ class Daemon:
             while True:
                 if self.scan_once():
                     self.render_all()
+                    if self.verbose:
+                        now = time.strftime("%H:%M:%S")
+                        sessions = sorted(self.index.sessions_known)
+                        print(f"[mycod {now}] rendered {len(sessions)} views ({', '.join(sessions)})", file=sys.stderr)
                 time.sleep(self.POLL_INTERVAL_SEC)
         except KeyboardInterrupt:
             pass
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("usage: mycod.py <swarm_dir>", file=sys.stderr)
+    quiet = "--quiet" in sys.argv or "-q" in sys.argv
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not args:
+        print("usage: mycod.py [-q|--quiet] <swarm_dir>", file=sys.stderr)
         sys.exit(2)
-    swarm_dir = Path(sys.argv[1]).resolve()
-    Daemon(swarm_dir).run()
+    swarm_dir = Path(args[0]).resolve()
+    Daemon(swarm_dir, verbose=not quiet).run()
 
 
 if __name__ == "__main__":

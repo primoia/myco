@@ -16,44 +16,57 @@ Se o contexto injetado não estiver presente (ex: hook desabilitado), leia manua
 
 ## Depois de qualquer ação relevante
 
-**Sempre** appenda uma linha em `../log/$MYCO_SESSION.log` descrevendo o que você fez. Use o Bash tool:
+**Sempre** registre o que você fez escrevendo um bloco `<myco>` no final da sua resposta. Não use Bash, não escreva em arquivos — apenas inclua o bloco no seu texto:
 
-```bash
-echo "$(date -Iseconds) $MYCO_SESSION <verbo> <objeto> [<detalhe>]" >> ../log/$MYCO_SESSION.log
+```
+<myco>
+start auth-api
+need IAM.auth.v2
+</myco>
 ```
 
-## Verbos
+Um hook captura esse bloco automaticamente e appenda no log certo, com timestamp e identidade. Você **não precisa saber** onde fica o log nem como o swarm funciona — só escreva o bloco.
 
-- `start <objeto>` — começou a trabalhar em algo
-- `done <objeto>` — terminou, efeito publicado
-- `need <objeto>` — declara que precisa de algo
-- `block <motivo>` — está bloqueado
-- `up <recurso>` / `down <recurso>` — container/endpoint mudou estado
-- `claim <tarefa>` — pegou uma tarefa pendente
-- `ask <persona> <pergunta>` — pergunta dirigida
-- `note <texto>` — observação livre
+### Quando logar
+
+- Começou uma tarefa → `start <objeto>`
+- Terminou → `done <objeto>`
+- Precisa de algo de outra sessão → `need <objeto>`
+- Está bloqueado → `block <motivo>`
+- Subiu/derrubou um recurso → `up <recurso>` / `down <recurso>`
+- Pergunta para alguém → `ask <destinatário> <pergunta>`
+- Observação livre → `note <texto>`
+
+### Exemplo de turno completo
+
+O humano pede pra implementar login. Você trabalha, e no final da resposta:
+
+```
+<myco>
+start login.endpoint
+need database.users-table
+</myco>
+```
+
+Se mais tarde o endpoint ficar pronto:
+
+```
+<myco>
+done login.endpoint
+up api.auth
+</myco>
+```
 
 ## Regras invioláveis
 
-1. **Nunca escreva** em `log/` de outra sessão
-2. **Nunca edite** arquivos de `view/` diretamente (são gerados pelo daemon)
-3. **Sempre** consulte sua view antes de decidir
-4. **Sempre** logue depois de agir
-5. Se ficar bloqueado por mais de uma iteração, use `ask DIRECTOR`
-
-## Comunicando-se com DIRECTOR
-
-DIRECTOR é a persona humana (possivelmente assistida por outra sessão Claude). Quando você tiver dúvidas de arquitetura ou precisar de autoridade, escreva:
-
-```bash
-echo "$(date -Iseconds) $MYCO_SESSION ask DIRECTOR <sua pergunta>" >> ../log/$MYCO_SESSION.log
-```
-
-A pergunta vai aparecer na view do DIRECTOR. Quando for respondida, virá como uma diretiva no topo da sua próxima view.
+1. **Sempre** logue depois de agir (bloco `<myco>` no final da resposta)
+2. **Sempre** use o contexto injetado (sua view) para informar decisões
+3. **Nunca** edite arquivos de `view/` diretamente (são gerados pelo daemon)
+4. Se ficar bloqueado por mais de uma iteração, use `ask DIRECTOR <sua pergunta>` — a pergunta aparece na view do DIRECTOR e a resposta volta como diretiva na sua próxima view
+5. **Respeite as diretivas** — elas vêm do humano, têm prioridade absoluta
 
 ## Princípios
 
-- **Autonomia com consciência**: você decide sozinho, mas informado
-- **Consciência sob demanda**: sua view só é relevante quando você consulta, então consulte de verdade
+- **Autonomia com consciência**: você decide sozinho, mas informado pela view
 - **Lower bound de fofoca**: logue mais do que parece necessário, o daemon filtra pros outros
-- **Respeite as diretivas**: elas vêm do humano, têm prioridade absoluta
+- **Zero tool calls pra coordenação**: a view é injetada, o log é capturado do bloco `<myco>` — você só escreve texto
