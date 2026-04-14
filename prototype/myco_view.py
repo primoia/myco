@@ -16,6 +16,7 @@ This module has no side effects at import time. It reuses SwarmIndex,
 parse_event and render_view from mycod.py via direct import.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -54,7 +55,18 @@ def render_view_for_session(swarm_dir: Path, session: str) -> str:
     # so render_view produces a non-empty view with status "unknown".
     index.sessions_known.add(session)
 
-    return render_view(index, session, swarm_dir=swarm_dir)
+    # Load session dirs for cross-repo artifact paths
+    session_dirs = {}
+    state_file = swarm_dir / ".myco-state.json"
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text())
+            session_dirs = state.get("sessions", {})
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return render_view(index, session, swarm_dir=swarm_dir,
+                       session_dirs=session_dirs)
 
 
 def main() -> int:

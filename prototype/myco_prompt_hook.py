@@ -32,6 +32,7 @@ the payload Claude Code hands us on stdin.
 import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 
 # Make sibling modules importable regardless of cwd.
@@ -79,6 +80,21 @@ def swarm_dir() -> Path:
     return Path(os.environ.get("MYCO_SWARM", "/mnt/ramdisk/myco"))
 
 
+def fetch_view_http(session: str) -> str:
+    """GET the view from the daemon via HTTP. Returns "" on failure."""
+    url = os.environ.get("MYCO_URL")
+    if not url:
+        return ""
+    try:
+        req = urllib.request.Request(f"{url}/view/{session}")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                return resp.read().decode("utf-8")
+    except Exception as e:
+        debug(f"HTTP GET view failed ({e}), falling back to filesystem")
+    return ""
+
+
 # ---------- Hook main ----------
 
 def main() -> int:
@@ -94,15 +110,19 @@ def main() -> int:
         debug("slash command detected, skipping injection")
         return 0
 
-    sd = swarm_dir()
-    if not sd.is_dir():
-        debug(f"swarm dir does not exist: {sd}")
-        return 0
-
     session = session_name(payload)
-    debug(f"session={session} swarm={sd}")
+    debug(f"session={session}")
 
-    rendered = render_view_for_session(sd, session)
+    # Try HTTP first, fall back to filesystem
+    rendered = fetch_view_http(session)
+    if not rendered:
+        sd = swarm_dir()
+        if not sd.is_dir():
+            debug(f"swarm dir does not exist: {sd}")
+            return 0
+        debug(f"using filesystem: swarm={sd}")
+        rendered = render_view_for_session(sd, session)
+
     if not rendered:
         debug("rendered view is empty, skipping injection")
         return 0

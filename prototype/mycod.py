@@ -18,17 +18,21 @@ The swarm directory must contain:
 Protocol v1. See docs/PROTOCOL.md for the event format.
 """
 
+import json
 import os
 import re
 import sys
 import time
 import tempfile
+import threading
 from collections import defaultdict, deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
 # ---------- Event parsing ----------
 
+_KNOWN_KV_KEYS = {"ref", "spec", "ack"}
 _KV_RE = re.compile(r'\b([a-z]+):(\S+)')
 
 
@@ -42,7 +46,10 @@ def parse_detail_kvs(detail: str):
     kvs = {}
     spans = []
     for m in _KV_RE.finditer(detail):
-        kvs[m.group(1)] = m.group(2)
+        key = m.group(1)
+        if key not in _KNOWN_KV_KEYS:
+            continue
+        kvs[key] = m.group(2)
         spans.append((m.start(), m.end()))
     if not spans:
         return detail, {}
@@ -66,8 +73,8 @@ def parse_event(session: str, line: str):
     if len(parts) < 3:
         return None
     ts = parts[0]
-    # parts[1] is the session id declared in the line; we trust filename
-    verb = parts[2] if len(parts) > 2 else ""
+    # parts[1] is the session id declared in the line; we trust the filename
+    verb = parts[2]
     obj = parts[3] if len(parts) > 3 else ""
     detail = parts[4] if len(parts) > 4 else ""
     detail_text, kvs = parse_detail_kvs(detail)
@@ -102,6 +109,7 @@ class SwarmIndex:
         self.msg_acks = defaultdict(set)   # msg_id → sessions that acked
         self.msg_targets = {}              # msg_id → target session
         self.answered_specs = set()        # spec ids that have been acked
+        self.resolved_questions = set()    # (frm, to, ts) tuples resolved by reply
 
     def apply(self, ev):
         s = ev["session"]
@@ -156,6 +164,20 @@ class SwarmIndex:
             if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
                 self.session_action[s] = f"ask {obj}"
+        elif verb == "reply":
+            # reply TARGET answer — resolves pending questions from TARGET→self
+            ack_id = kvs.get("ack")
+            if ack_id:
+                self.msg_acks[ack_id].add(s)
+                self.answered_specs.add(ack_id)
+            spec_id = kvs.get("spec")
+            if spec_id:
+                self.msg_targets[spec_id] = obj  # obj = target session
+            # Resolve all open questions from target→self
+            self._resolve_questions_between(obj, s)
+            if self.session_status.get(s) in (None, "unknown"):
+                self.session_status[s] = "active"
+                self.session_action[s] = f"reply {obj}"
         elif verb == "note":
             # v1: track ack for messages and resolve associated questions
             ack_id = kvs.get("ack")
@@ -166,6 +188,19 @@ class SwarmIndex:
             if s not in self.session_status or self.session_status[s] == "unknown":
                 self.session_status[s] = "active"
                 self.session_action[s] = f"note {obj}"
+
+    def _resolve_questions_between(self, asker: str, replier: str):
+        """Mark all open questions from asker→replier as resolved.
+        Also acks any associated spec: messages."""
+        for ts, frm, to, detail in self.questions:
+            if frm == asker and to == replier:
+                self.resolved_questions.add((frm, to, ts))
+                # Auto-ack the spec if present
+                _, q_kvs = parse_detail_kvs(detail)
+                spec_id = q_kvs.get("spec")
+                if spec_id:
+                    self.msg_acks[spec_id].add(replier)
+                    self.answered_specs.add(spec_id)
 
     def satisfied(self, artifact: str) -> bool:
         for provided in self.provides.values():
@@ -216,8 +251,26 @@ class SwarmIndex:
         if verb == "ask" and ev["obj"] == session:
             return True
 
-        # Note spam from others: hide
-        if verb == "note" and s != session:
+        # Replies: only visible to sender and target (private channel)
+        if verb == "reply":
+            return ev["obj"] == session
+
+        # Notes: filtered by type
+        if verb == "note":
+            if s == session:
+                return True  # already caught above, but explicit
+            kvs = ev.get("kvs", {})
+            ack_id = kvs.get("ack")
+            if ack_id:
+                # Ack notes visible only to the session that sent the original msg
+                # msg_id like "msg/CART-001.md" → sender is "CART" (prefix before dash)
+                # But more reliably: check who asked with this spec
+                for q_ts, q_frm, q_to, q_detail in self.questions:
+                    _, q_kvs = parse_detail_kvs(q_detail)
+                    if q_kvs.get("spec") == ack_id and q_frm == session:
+                        return True
+                return False
+            # Other notes from others: hide (spam filter)
             return False
 
         # All other events from other sessions: visible
@@ -239,7 +292,7 @@ class SwarmIndex:
         # msg_targets keys are like "msg/CART-001.md"
         target_to_sender = {}
         for ev in self.events:
-            if ev["verb"] == "ask":
+            if ev["verb"] in ("ask", "reply"):
                 kvs = ev.get("kvs", {})
                 msg_id = kvs.get("spec")
                 if msg_id and self.msg_targets.get(msg_id) == session:
@@ -272,7 +325,8 @@ class SwarmIndex:
 
 # ---------- Rendering ----------
 
-def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None) -> str:
+def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
+                session_dirs: dict = None) -> str:
     blockers = index.blockers_for(session)
     dependents = index.dependents_of(session)
     resources = dict(index.resources)
@@ -290,6 +344,9 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None) -> str:
         _, q_kvs = parse_detail_kvs(detail)
         spec_id = q_kvs.get("spec")
         if spec_id and spec_id in index.answered_specs:
+            continue
+        # Check if resolved by a reply
+        if (frm, to, ts) in index.resolved_questions:
             continue
         my_questions.append(q)
     msg_dir = swarm_dir / "msg" if swarm_dir else None
@@ -337,10 +394,14 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None) -> str:
     # v1: ARTEFATOS PUBLICADOS (permanent, never capped)
     lines.append("## ARTEFATOS PUBLICADOS")
     if index.artifacts:
-        lines.append("| sessão | artefato | ref | spec |")
-        lines.append("|---|---|---|---|")
+        lines.append("| sessão | artefato | ref | path | spec |")
+        lines.append("|---|---|---|---|---|")
         for a in index.artifacts:
-            lines.append(f"| {a['session']} | {a['obj']} | {a['ref'] or '—'} | {a['spec'] or '—'} |")
+            s_dir = (session_dirs or {}).get(a["session"], "")
+            ref = a["ref"] or "—"
+            spec = a["spec"] or "—"
+            path = s_dir or "—"
+            lines.append(f"| {a['session']} | {a['obj']} | {ref} | {path} | {spec} |")
     else:
         lines.append("Nenhum artefato publicado.")
     lines.append("")
@@ -486,13 +547,53 @@ class Daemon:
         self.buffers = {}
         self.render_count = 0
         self.verbose = verbose
+        self.session_dirs = self._load_session_dirs()
+        self.lock = threading.Lock()
+        self.view_cache = {}
+
+    def _load_session_dirs(self) -> dict:
+        """Load session→project_dir mapping from .myco-state.json."""
+        state_file = self.swarm_dir / ".myco-state.json"
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text())
+                return state.get("sessions", {})
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
 
     def render_all(self):
         sessions = set(self.index.sessions_known) | {"DIRECTOR"}
         for s in sessions:
-            content = render_view(self.index, s, swarm_dir=self.swarm_dir)
+            content = render_view(self.index, s, swarm_dir=self.swarm_dir,
+                                  session_dirs=self.session_dirs)
+            self.view_cache[s] = content
             write_view_atomic(self.view_dir / f"{s}.md", content)
         self.render_count += 1
+
+    def _render_to_cache(self):
+        """Render all views to in-memory cache only (no filesystem writes).
+        Caller must hold self.lock."""
+        sessions = set(self.index.sessions_known) | {"DIRECTOR"}
+        for s in sessions:
+            self.view_cache[s] = render_view(
+                self.index, s, swarm_dir=self.swarm_dir,
+                session_dirs=self.session_dirs,
+            )
+        self.render_count += 1
+
+    def ingest_events(self, session: str, event_lines: list):
+        """Thread-safe ingestion of events from HTTP POST.
+        Persists to log file and updates index + view cache."""
+        with self.lock:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+            log_file = self.log_dir / f"{session}.log"
+            with open(log_file, "a") as f:
+                for ev_line in event_lines:
+                    full_line = f"{ts} {session} {ev_line}"
+                    f.write(full_line + "\n")
+                    self.process_line(session, full_line)
+            self._render_to_cache()
 
     def process_line(self, session: str, line: str) -> bool:
         ev = parse_event(session, line)
@@ -549,15 +650,22 @@ class Daemon:
 
         return changed
 
-    def run(self):
+    def run(self, port: int = 0):
+        # Initial setup: ensure DIRECTOR exists, replay logs, render
+        (self.log_dir / "DIRECTOR.log").touch(exist_ok=True)
+        self.index.sessions_known.add("DIRECTOR")
+        self.scan_once()
+        self.render_all()
+
+        if port:
+            self._run_http(port)
+        else:
+            self._run_poll()
+
+    def _run_poll(self):
         print(f"[mycod] watching {self.log_dir}", file=sys.stderr)
         print(f"[mycod] writing to {self.view_dir}", file=sys.stderr)
         print(f"[mycod] poll interval: {self.POLL_INTERVAL_SEC*1000:.1f}ms", file=sys.stderr)
-
-        # Initial render so view files exist even if no events yet
-        (self.log_dir / "DIRECTOR.log").touch(exist_ok=True)
-        self.index.sessions_known.add("DIRECTOR")
-        self.render_all()
 
         try:
             while True:
@@ -571,15 +679,138 @@ class Daemon:
         except KeyboardInterrupt:
             pass
 
+    def _run_http(self, port: int):
+        server = MycoHTTPServer(("", port), MycoHandler, self)
+        print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
+        print(f"[mycod] swarm dir: {self.swarm_dir}", file=sys.stderr)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            server.shutdown()
+
+
+# ---------- HTTP server ----------
+
+class MycoHTTPServer(ThreadingHTTPServer):
+    """HTTP server that holds a reference to the Daemon instance."""
+
+    def __init__(self, server_address, handler_class, daemon: Daemon):
+        self.daemon_ref = daemon  # avoid shadowing socketserver.BaseServer.daemon
+        super().__init__(server_address, handler_class)
+
+
+class MycoHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for the myco daemon."""
+
+    def do_GET(self):
+        if self.path.startswith("/view/"):
+            session = self.path[6:].strip("/").upper()
+            daemon = self.server.daemon_ref
+            with daemon.lock:
+                view = daemon.view_cache.get(session, "")
+            self._respond(200, view, content_type="text/markdown; charset=utf-8")
+        elif self.path == "/status":
+            daemon = self.server.daemon_ref
+            with daemon.lock:
+                status = self._build_status()
+            self._respond(200, json.dumps(status), content_type="application/json")
+        else:
+            self._respond(404, "not found")
+
+    def do_POST(self):
+        if self.path == "/events":
+            body = self._read_body()
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                self._respond(400, json.dumps({"ok": False, "error": "invalid JSON"}),
+                              content_type="application/json")
+                return
+            session = data.get("session", "").upper()
+            events = data.get("events", [])
+            if not session or not events:
+                self._respond(400, json.dumps({"ok": False, "error": "missing session or events"}),
+                              content_type="application/json")
+                return
+            self.server.daemon_ref.ingest_events(session, events)
+            self._respond(200, json.dumps({"ok": True, "count": len(events)}),
+                          content_type="application/json")
+        elif self.path.startswith("/dispatch/"):
+            session = self.path[10:].strip("/").upper()
+            body = self._read_body()
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                self._respond(400, json.dumps({"ok": False, "error": "invalid JSON"}),
+                              content_type="application/json")
+                return
+            prompt = data.get("prompt", "")
+            if not prompt:
+                self._respond(400, json.dumps({"ok": False, "error": "missing prompt"}),
+                              content_type="application/json")
+                return
+            dispatch_dir = self.server.daemon_ref.swarm_dir / "dispatch"
+            dispatch_dir.mkdir(parents=True, exist_ok=True)
+            dispatch_file = dispatch_dir / f"{session}.prompt"
+            dispatch_file.write_text(prompt)
+            self._respond(200, json.dumps({"ok": True}),
+                          content_type="application/json")
+        else:
+            self._respond(404, "not found")
+
+    def _read_body(self) -> str:
+        length = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(length).decode("utf-8")
+
+    def _respond(self, code: int, body: str, content_type: str = "text/plain"):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        encoded = body.encode("utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _build_status(self) -> dict:
+        daemon = self.server.daemon_ref
+        sessions = {}
+        for s in sorted(daemon.index.sessions_known):
+            sessions[s] = {
+                "status": daemon.index.session_status.get(s, "unknown"),
+                "action": daemon.index.session_action.get(s, ""),
+                "blockers": daemon.index.blockers_for(s),
+                "dependents": daemon.index.dependents_of(s),
+            }
+        return {"sessions": sessions}
+
+    def log_message(self, format, *args):
+        if self.server.daemon_ref.verbose:
+            sys.stderr.write(f"[mycod-http] {format % args}\n")
+
 
 def main():
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if not args:
-        print("usage: mycod.py [-q|--quiet] <swarm_dir>", file=sys.stderr)
+    port = 0
+    args_raw = sys.argv[1:]
+    # Parse --port
+    filtered = []
+    i = 0
+    while i < len(args_raw):
+        if args_raw[i] == "--port" and i + 1 < len(args_raw):
+            port = int(args_raw[i + 1])
+            i += 2
+        elif args_raw[i].startswith("--port="):
+            port = int(args_raw[i].split("=", 1)[1])
+            i += 1
+        elif args_raw[i] in ("-q", "--quiet"):
+            i += 1
+        else:
+            filtered.append(args_raw[i])
+            i += 1
+    if not filtered:
+        print("usage: mycod.py [-q|--quiet] [--port PORT] <swarm_dir>", file=sys.stderr)
         sys.exit(2)
-    swarm_dir = Path(args[0]).resolve()
-    Daemon(swarm_dir, verbose=not quiet).run()
+    swarm_dir = Path(filtered[0]).resolve()
+    Daemon(swarm_dir, verbose=not quiet).run(port=port)
 
 
 if __name__ == "__main__":

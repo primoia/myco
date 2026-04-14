@@ -1,6 +1,6 @@
 # Instruções de sessão
 
-Você é uma sessão num swarm de sessões Claude trabalhando em paralelo no mesmo projeto. Sua identidade de sessão está na variável de ambiente `MYCO_SESSION`. Se não estiver definida, pergunte ao humano antes de fazer qualquer coisa.
+Você é uma sessão num swarm de sessões Claude trabalhando em paralelo. Sua identidade de sessão está na variável de ambiente `MYCO_SESSION`. Se não estiver definida, pergunte ao humano antes de fazer qualquer coisa.
 
 ## Como você recebe informação do swarm
 
@@ -28,9 +28,35 @@ Um serviço externo captura esse bloco e distribui para as outras sessões. **N�
 - `block <motivo>` — estou bloqueado
 - `up <recurso>` / `down <recurso>` — recurso subiu/caiu
 - `ask <destinatário> <pergunta>` — pergunta dirigida (use `spec:` para specs ricas)
-- `note <texto>` — observação livre (use `ack:` para confirmar recebimento)
+- `reply <destinatário> <resposta>` — resposta a uma pergunta (use `spec:` para detalhes)
+- `note <texto>` — observação interna (ATENÇÃO: `note` NÃO é visível para outras sessões! Use `reply` para responder perguntas)
 
-## Convenções key:value (v1)
+## Comunicação entre sessões
+
+### Perguntar
+```
+<myco>
+ask AUTH preciso-de-ajustes spec:msg/CART-001.md
+</myco>
+```
+
+### Responder (IMPORTANTE: use reply, não note)
+```
+<myco>
+reply CART resposta-sobre-ajustes spec:msg/AUTH-002.md
+</myco>
+```
+
+`reply` é visível ao destinatário e limpa a pergunta de PERGUNTAS PENDENTES. `note` é invisível para outras sessões — só serve para registros internos.
+
+### Confirmar recebimento
+```
+<myco>
+note ack ack:msg/CART-001.md
+</myco>
+```
+
+## Convenções key:value
 
 Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 
@@ -40,32 +66,9 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 
-### Exemplos
-
-Completou uma tarefa com referência git:
-```
-<myco>
-done auth-api-v2 ref:origin/feat/new-login spec:msg/AUTH-001.md
-</myco>
-```
-
-Pergunta com spec detalhada:
-```
-<myco>
-ask AUTH preciso-de-ajustes spec:msg/CART-001.md
-</myco>
-```
-
-Confirmou recebimento de mensagem:
-```
-<myco>
-note recebido ack:msg/CART-001.md
-</myco>
-```
-
 ## Comunicação rica via msg/
 
-O diretório de mensagens fica em `$MYCO_SWARM/msg/` (a variável `MYCO_SWARM` está no seu ambiente; default `/mnt/ramdisk/myco`).
+O diretório de mensagens fica em `$MYCO_SWARM/msg/`.
 
 ### Enviar uma mensagem
 
@@ -74,16 +77,20 @@ O diretório de mensagens fica em `$MYCO_SWARM/msg/` (a variável `MYCO_SWARM` e
 
 ### Receber uma mensagem
 
-Quando a seção **MENSAGENS PENDENTES** da sua view mostrar uma mensagem, faça:
+Quando a seção **MENSAGENS PENDENTES** da sua view mostrar uma mensagem:
 
-1. **Leia o arquivo** com a tool Read: `Read $MYCO_SWARM/msg/ARQUIVO.md` (o path completo aparece na view)
+1. **Leia o arquivo** com a tool Read (o path completo aparece na view)
 2. **Confirme leitura** no `<myco>` block: `note ack ack:msg/ARQUIVO.md`
 
-A mensagem sai da sua view após o ack.
+## Acessar código de outras sessões
 
-### Convenção de nomes
+O diretório `peers/` no seu projeto contém symlinks para os projetos das outras sessões. Para ler código da sessão AUTH:
 
-`SESSAO-NNN.md` (ex: `AUTH-001.md`, `CART-002.md`).
+```
+Read peers/AUTH/index.js
+```
+
+A tabela de ARTEFATOS PUBLICADOS mostra o path de cada sessão para referência.
 
 ## Regras
 
@@ -94,3 +101,4 @@ A mensagem sai da sua view após o ack.
 5. Foque no trabalho que o humano pedir — o swarm é só coordenação
 6. Use `ref:` no `done` quando tiver uma branch/tag para publicar
 7. Use `msg/` para specs detalhadas, não tente enfiar tudo numa linha
+8. **Use `reply` para responder perguntas, NUNCA `note`** — note é invisível para outras sessões

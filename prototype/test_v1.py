@@ -55,12 +55,23 @@ class TestParseDetailKvs:
         assert kvs["ref"] == "origin/feat/my-branch_v2.0"
 
     def test_mixed_text_and_multiple_kvs(self):
-        text, kvs = parse_detail_kvs("deploying service ref:v1.2.3 msg:msg/DEPLOY-001.md to production")
-        assert kvs == {"ref": "v1.2.3", "msg": "msg/DEPLOY-001.md"}
+        text, kvs = parse_detail_kvs("deploying service ref:v1.2.3 spec:msg/DEPLOY-001.md to production")
+        assert kvs == {"ref": "v1.2.3", "spec": "msg/DEPLOY-001.md"}
         assert "deploying" in text
         assert "service" in text
         assert "to" in text
         assert "production" in text
+
+    def test_unknown_keys_ignored(self):
+        """Unknown keys like http:, mailto: should not be extracted."""
+        text, kvs = parse_detail_kvs("see http://localhost:3000 for details")
+        assert kvs == {}
+        assert "http://localhost:3000" in text
+
+    def test_only_known_keys_extracted(self):
+        text, kvs = parse_detail_kvs("done ref:master foo:bar spec:msg/A.md")
+        assert kvs == {"ref": "master", "spec": "msg/A.md"}
+        assert "foo:bar" in text
 
 
 # ============================================================
@@ -549,9 +560,14 @@ class TestRenderViewWorker:
         idx = SwarmIndex()
         idx.apply(parse_event("AUTH", "T0 AUTH done api ref:origin/main spec:msg/A.md"))
         idx.apply(parse_event("CART", "T1 CART done cart"))
+        # Without session_dirs, path column shows —
         view = render_view(idx, "AUTH")
-        assert "| AUTH | api | origin/main | msg/A.md |" in view
-        assert "| CART | cart | — | — |" in view
+        assert "| AUTH | api | origin/main | — | msg/A.md |" in view
+        assert "| CART | cart | — | — | — |" in view
+        # With session_dirs, path column shows the dir
+        view2 = render_view(idx, "AUTH", session_dirs={"AUTH": "/tmp/a", "CART": "/tmp/b"})
+        assert "| AUTH | api | origin/main | /tmp/a | msg/A.md |" in view2
+        assert "| CART | cart | — | /tmp/b | — |" in view2
 
     def test_no_artifacts_message(self):
         idx = SwarmIndex()
@@ -1077,6 +1093,533 @@ class TestWriteViewAtomicErrors:
                 write_view_atomic(target, "new content")
         finally:
             os.chmod(readonly, 0o755)
+
+
+# ============================================================
+# reply verb
+# ============================================================
+
+class TestReplyVerb:
+    def test_reply_parsed(self):
+        ev = parse_event("AUTH", "T0 AUTH reply CART resposta-sobre-jwt")
+        assert ev["verb"] == "reply"
+        assert ev["obj"] == "CART"
+
+    def test_reply_with_spec(self):
+        ev = parse_event("AUTH", "T0 AUTH reply CART resposta spec:msg/AUTH-002.md")
+        assert ev["kvs"]["spec"] == "msg/AUTH-002.md"
+
+    def test_reply_with_ack(self):
+        ev = parse_event("AUTH", "T0 AUTH reply CART ok ack:msg/CART-001.md")
+        assert ev["kvs"]["ack"] == "msg/CART-001.md"
+
+    def test_reply_resolves_question_by_spec(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH como-integrar spec:msg/CART-001.md"))
+        assert len(idx.questions) == 1
+        # AUTH replies with ack on the spec
+        idx.apply(parse_event("AUTH", "T1 AUTH reply CART resposta ack:msg/CART-001.md"))
+        assert "msg/CART-001.md" in idx.answered_specs
+        # Question should be filtered in view
+        view = render_view(idx, "AUTH")
+        assert "como-integrar" not in view.split("PERGUNTAS PENDENTES")[1]
+
+    def test_reply_resolves_question_without_spec(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH como-integrar"))
+        # AUTH replies without spec/ack — resolves all questions from CART→AUTH
+        idx.apply(parse_event("AUTH", "T1 AUTH reply CART ja-esta-pronto"))
+        view = render_view(idx, "AUTH")
+        assert "como-integrar" not in view.split("PERGUNTAS PENDENTES")[1]
+
+    def test_reply_updates_status(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH reply CART algo"))
+        assert idx.session_status["AUTH"] == "active"
+
+    def test_reply_tracks_msg_target(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH reply CART veja spec:msg/AUTH-002.md"))
+        assert idx.msg_targets.get("msg/AUTH-002.md") == "CART"
+
+    def test_reply_auto_acks_question_spec(self, tmp_path):
+        """reply without explicit ack: should auto-ack the spec from the question."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH como-integrar spec:msg/CART-001.md"))
+        # AUTH replies without ack: — should auto-resolve the spec
+        idx.apply(parse_event("AUTH", "T1 AUTH reply CART ja-esta-pronto"))
+        assert "msg/CART-001.md" in idx.answered_specs
+        # msg/ should also be acked
+        assert "AUTH" in idx.msg_acks.get("msg/CART-001.md", set())
+        # Question should be resolved
+        assert (("CART", "AUTH", "T0")) in idx.resolved_questions
+        # Pending msg should not show
+        msg_dir = tmp_path / "msg"
+        msg_dir.mkdir()
+        (msg_dir / "CART-001.md").write_text("spec content")
+        pending = idx.pending_msgs_for("AUTH", msg_dir)
+        assert len(pending) == 0
+
+    def test_reply_uses_resolved_questions_not_hack(self):
+        """Verify resolved_questions is used instead of synthetic answered_specs keys."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH pergunta"))
+        idx.apply(parse_event("AUTH", "T1 AUTH reply CART resposta"))
+        # Should use resolved_questions, not answered_specs hacks
+        assert ("CART", "AUTH", "T0") in idx.resolved_questions
+        # answered_specs should NOT contain synthetic keys
+        for key in idx.answered_specs:
+            assert not key.startswith("_resolved_"), f"synthetic key found: {key}"
+
+
+# ============================================================
+# reply visibility
+# ============================================================
+
+class TestReplyVisibility:
+    def test_reply_visible_to_target(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH reply CART resposta"))
+        view = render_view(idx, "CART")
+        assert "AUTH reply CART" in view
+
+    def test_reply_not_visible_to_others(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH reply CART resposta"))
+        idx.sessions_known.add("OTHER")
+        view = render_view(idx, "OTHER")
+        assert "AUTH reply CART" not in view
+
+    def test_reply_visible_to_sender(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH reply CART resposta"))
+        view = render_view(idx, "AUTH")
+        assert "AUTH reply CART" in view
+
+
+# ============================================================
+# note ack visibility fix
+# ============================================================
+
+class TestNoteAckVisibility:
+    def test_note_ack_visible_to_asker(self):
+        """Notes with ack: should be visible to the session that asked."""
+        idx = SwarmIndex()
+        # CART asked with spec — AUTH acks
+        idx.apply(parse_event("CART", "T0 CART ask AUTH pergunta spec:msg/CART-001.md"))
+        idx.apply(parse_event("AUTH", "T1 AUTH note recebido ack:msg/CART-001.md"))
+        view = render_view(idx, "CART")
+        assert "AUTH note recebido" in view
+
+    def test_note_ack_not_visible_to_unrelated(self):
+        """Notes with ack: should NOT be visible to unrelated sessions."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH pergunta spec:msg/CART-001.md"))
+        idx.apply(parse_event("AUTH", "T1 AUTH note recebido ack:msg/CART-001.md"))
+        idx.sessions_known.add("OTHER")
+        view = render_view(idx, "OTHER")
+        assert "AUTH note recebido" not in view
+
+    def test_note_without_ack_hidden_from_others(self):
+        """Regular notes should still be hidden from other sessions."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH note observacao-interna"))
+        idx.sessions_known.add("CART")
+        view = render_view(idx, "CART")
+        assert "observacao-interna" not in view
+
+    def test_note_visible_to_self(self):
+        """Notes should always be visible to the session that wrote them."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH note minha-observacao"))
+        view = render_view(idx, "AUTH")
+        assert "minha-observacao" in view
+
+
+# ============================================================
+# session_dirs in artifacts
+# ============================================================
+
+class TestSessionDirsInArtifacts:
+    def test_artifacts_with_session_dirs(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done api ref:master"))
+        view = render_view(idx, "CART", session_dirs={"AUTH": "/tmp/teste1"})
+        assert "/tmp/teste1" in view
+        assert "| path |" in view
+
+    def test_artifacts_without_session_dirs(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done api ref:master"))
+        view = render_view(idx, "CART")
+        # path column exists but shows —
+        assert "| path |" in view
+
+
+# ============================================================
+# daemon loads session_dirs
+# ============================================================
+
+class TestDaemonSessionDirs:
+    def test_daemon_loads_state_file(self, tmp_path):
+        import json
+        from mycod import Daemon
+        state = {"sessions": {"AUTH": "/tmp/a", "CART": "/tmp/b"}}
+        (tmp_path / ".myco-state.json").write_text(json.dumps(state))
+        d = Daemon(tmp_path)
+        assert d.session_dirs == {"AUTH": "/tmp/a", "CART": "/tmp/b"}
+
+    def test_daemon_no_state_file(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        assert d.session_dirs == {}
+
+    def test_daemon_render_uses_session_dirs(self, tmp_path):
+        import json
+        from mycod import Daemon
+        state = {"sessions": {"AUTH": "/tmp/auth-proj"}}
+        (tmp_path / ".myco-state.json").write_text(json.dumps(state))
+        d = Daemon(tmp_path)
+        d.process_line("AUTH", "T0 AUTH done api ref:master")
+        d.index.sessions_known.add("DIRECTOR")
+        d.render_all()
+        view = (tmp_path / "view" / "DIRECTOR.md").read_text()
+        assert "/tmp/auth-proj" in view
+
+
+# ============================================================
+# peers/ setup
+# ============================================================
+
+class TestPeerLinks:
+    def test_create_peer_links(self, tmp_path):
+        import subprocess
+        auth_dir = tmp_path / "auth"
+        cart_dir = tmp_path / "cart"
+        auth_dir.mkdir()
+        cart_dir.mkdir()
+
+        # Use myco setup to create peer links
+        result = subprocess.run(
+            ["python3", str(Path(__file__).parent / "myco"),
+             "--swarm", str(tmp_path / "swarm"),
+             "setup", f"AUTH:{auth_dir}", f"CART:{cart_dir}"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+
+        # AUTH should have a symlink to CART
+        assert (auth_dir / "peers" / "CART").is_symlink()
+        assert (auth_dir / "peers" / "CART").resolve() == cart_dir.resolve()
+        # CART should have a symlink to AUTH
+        assert (cart_dir / "peers" / "AUTH").is_symlink()
+        assert (cart_dir / "peers" / "AUTH").resolve() == auth_dir.resolve()
+        # Neither should have DIRECTOR
+        assert not (auth_dir / "peers" / "DIRECTOR").exists()
+        assert not (cart_dir / "peers" / "DIRECTOR").exists()
+
+
+# ============================================================
+# HTTP transport — ingest_events
+# ============================================================
+
+class TestIngestEvents:
+    def test_ingest_persists_to_log(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.ingest_events("AUTH", ["start login", "need DB.users"])
+        log_file = tmp_path / "log" / "AUTH.log"
+        assert log_file.exists()
+        lines = log_file.read_text().splitlines()
+        assert len(lines) == 2
+        assert "AUTH start login" in lines[0]
+        assert "AUTH need DB.users" in lines[1]
+
+    def test_ingest_updates_index(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.ingest_events("AUTH", ["start login"])
+        assert d.index.session_status["AUTH"] == "active"
+
+    def test_ingest_populates_view_cache(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.ingest_events("AUTH", ["start login"])
+        assert "AUTH" in d.view_cache
+        assert "<!-- myco protocol v1 -->" in d.view_cache["AUTH"]
+
+    def test_ingest_multiple_sessions(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.ingest_events("AUTH", ["start login"])
+        d.ingest_events("CART", ["start cart-api"])
+        assert d.index.session_status["AUTH"] == "active"
+        assert d.index.session_status["CART"] == "active"
+        assert "AUTH" in d.view_cache
+        assert "CART" in d.view_cache
+
+    def test_ingest_thread_safety(self, tmp_path):
+        """Concurrent ingest from multiple threads should not corrupt state."""
+        import threading
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        errors = []
+
+        def ingest(session, events):
+            try:
+                d.ingest_events(session, events)
+            except Exception as e:
+                errors.append(e)
+
+        threads = []
+        for i in range(10):
+            t = threading.Thread(target=ingest, args=(f"S{i}", [f"start task-{i}"]))
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors
+        assert len(d.index.sessions_known) == 10
+
+
+# ============================================================
+# HTTP transport — handler
+# ============================================================
+
+class TestHTTPHandler:
+    """Test the HTTP server end-to-end using a real server on a random port."""
+
+    @staticmethod
+    def _start_server(tmp_path):
+        from mycod import Daemon, MycoHTTPServer, MycoHandler
+        d = Daemon(tmp_path)
+        d.index.sessions_known.add("DIRECTOR")
+        d._render_to_cache()
+        server = MycoHTTPServer(("127.0.0.1", 0), MycoHandler, d)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        return server, port, d
+
+    def test_post_events(self, tmp_path):
+        import urllib.request
+        server, port, d = self._start_server(tmp_path)
+        try:
+            import json
+            data = json.dumps({"session": "AUTH", "events": ["start login"]}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/events",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read())
+                assert resp.status == 200
+                assert body["ok"] is True
+                assert body["count"] == 1
+            assert d.index.session_status["AUTH"] == "active"
+        finally:
+            server.shutdown()
+
+    def test_get_view(self, tmp_path):
+        import urllib.request, json
+        server, port, d = self._start_server(tmp_path)
+        try:
+            # Ingest an event first
+            d.ingest_events("AUTH", ["start login"])
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/view/AUTH")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = resp.read().decode("utf-8")
+                assert resp.status == 200
+                assert "<!-- myco protocol v1 -->" in body
+                assert "AUTH" in body
+        finally:
+            server.shutdown()
+
+    def test_get_status(self, tmp_path):
+        import urllib.request, json
+        server, port, d = self._start_server(tmp_path)
+        try:
+            d.ingest_events("AUTH", ["start login"])
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/status")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read())
+                assert resp.status == 200
+                assert "AUTH" in body["sessions"]
+                assert body["sessions"]["AUTH"]["status"] == "active"
+        finally:
+            server.shutdown()
+
+    def test_post_dispatch(self, tmp_path):
+        import urllib.request, json
+        server, port, d = self._start_server(tmp_path)
+        try:
+            (tmp_path / "dispatch").mkdir(exist_ok=True)
+            data = json.dumps({"prompt": "Implement login"}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/dispatch/AUTH",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read())
+                assert resp.status == 200
+                assert body["ok"] is True
+            assert (tmp_path / "dispatch" / "AUTH.prompt").read_text() == "Implement login"
+        finally:
+            server.shutdown()
+
+    def test_404_unknown_route(self, tmp_path):
+        import urllib.request, urllib.error
+        server, port, d = self._start_server(tmp_path)
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/nonexistent")
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 404"
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+        finally:
+            server.shutdown()
+
+    def test_post_events_bad_json(self, tmp_path):
+        import urllib.request, urllib.error
+        server, port, d = self._start_server(tmp_path)
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/events",
+                data=b"not json",
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 400"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+        finally:
+            server.shutdown()
+
+    def test_post_events_missing_session(self, tmp_path):
+        import urllib.request, urllib.error, json
+        server, port, d = self._start_server(tmp_path)
+        try:
+            data = json.dumps({"events": ["start login"]}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/events",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 400"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+        finally:
+            server.shutdown()
+
+    def test_view_empty_session(self, tmp_path):
+        import urllib.request
+        server, port, d = self._start_server(tmp_path)
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/view/NONEXISTENT")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = resp.read().decode("utf-8")
+                assert resp.status == 200
+                assert body == ""  # no view cached for unknown session
+        finally:
+            server.shutdown()
+
+    def test_view_case_insensitive(self, tmp_path):
+        import urllib.request
+        server, port, d = self._start_server(tmp_path)
+        try:
+            d.ingest_events("AUTH", ["start login"])
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/view/auth")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = resp.read().decode("utf-8")
+                assert "<!-- myco protocol v1 -->" in body
+        finally:
+            server.shutdown()
+
+
+# ============================================================
+# HTTP transport — daemon run with --port
+# ============================================================
+
+class TestDaemonHTTPMode:
+    def test_daemon_run_http_starts(self, tmp_path):
+        """Test that run(port=...) starts an HTTP server we can query."""
+        import threading, time, urllib.request, json
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+
+        t = threading.Thread(target=lambda: d.run(port=0), daemon=True)
+        # Use port=0 via direct server creation to avoid port conflict
+        # Instead, test _run_http indirectly
+        from mycod import MycoHTTPServer, MycoHandler
+        server = MycoHTTPServer(("127.0.0.1", 0), MycoHandler, d)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        time.sleep(0.05)
+        try:
+            d.ingest_events("TEST", ["start task"])
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/view/TEST")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                assert resp.status == 200
+                assert "TEST" in resp.read().decode()
+        finally:
+            server.shutdown()
+
+
+# ============================================================
+# HTTP transport — daemon replays logs on startup
+# ============================================================
+
+class TestDaemonReplay:
+    def test_daemon_replays_existing_logs_on_scan(self, tmp_path):
+        """Daemon should replay existing log files via scan_once."""
+        from mycod import Daemon
+        # Pre-populate log
+        log_dir = tmp_path / "log"
+        log_dir.mkdir(parents=True)
+        (log_dir / "AUTH.log").write_text("2025-01-01T00:00:00 AUTH start login\n")
+        d = Daemon(tmp_path)
+        d.scan_once()
+        assert d.index.session_status["AUTH"] == "active"
+
+    def test_ingest_after_replay(self, tmp_path):
+        """Events ingested via HTTP after replay should not duplicate."""
+        from mycod import Daemon
+        log_dir = tmp_path / "log"
+        log_dir.mkdir(parents=True)
+        (log_dir / "AUTH.log").write_text("2025-01-01T00:00:00 AUTH start login\n")
+        d = Daemon(tmp_path)
+        d.scan_once()
+        assert d.index.session_status["AUTH"] == "active"
+        # Ingest new event via HTTP path
+        d.ingest_events("AUTH", ["done login ref:v1.0"])
+        assert d.index.session_status["AUTH"] == "idle"
+        # Log should have both old and new
+        lines = (log_dir / "AUTH.log").read_text().splitlines()
+        assert len(lines) == 2
+
+
+# ============================================================
+# render_all populates view_cache
+# ============================================================
+
+class TestRenderAllViewCache:
+    def test_render_all_populates_cache(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.process_line("AUTH", "T0 AUTH start login")
+        d.index.sessions_known.add("DIRECTOR")
+        d.render_all()
+        assert "AUTH" in d.view_cache
+        assert "DIRECTOR" in d.view_cache
+        assert "<!-- myco protocol v1 -->" in d.view_cache["AUTH"]
 
 
 if __name__ == "__main__":

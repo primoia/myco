@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""
+myco — CLI para setup, daemon e sessões do swarm.
+
+Uso:
+    myco setup AUTH:/tmp/teste1 CART:/tmp/teste2
+    myco daemon
+    myco session AUTH
+    myco dispatch AUTH "Implementa login"
+    myco view AUTH
+    myco status
+    myco teardown
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+MYCO_DIR = Path(__file__).resolve().parent
+DEFAULT_SWARM = Path(os.environ.get("MYCO_SWARM", "/mnt/ramdisk/myco"))
+STATE_FILE_NAME = ".myco-state.json"
+
+
+def _state_path(swarm: Path) -> Path:
+    return swarm / STATE_FILE_NAME
+
+
+def _load_state(swarm: Path) -> dict:
+    p = _state_path(swarm)
+    if p.exists():
+        return json.loads(p.read_text())
+    return {"sessions": {}}
+
+
+def _save_state(swarm: Path, state: dict):
+    _state_path(swarm).write_text(json.dumps(state, indent=2) + "\n")
+
+
+def _hooks_json() -> dict:
+    """Generate .claude/settings.json pointing to the hooks."""
+    return {
+        "hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": f"python3 {MYCO_DIR / 'myco-hook.py'}"}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"python3 {MYCO_DIR / 'myco_prompt_hook.py'}"}]}],
+        }
+    }
+
+
+def _setup_session_dir(name: str, project_dir: Path, swarm: Path):
+    """Initialize a session working directory."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    # git init if needed
+    git_dir = project_dir / ".git"
+    if not git_dir.exists():
+        subprocess.run(["git", "init", str(project_dir)], capture_output=True)
+        # Create initial commit so Claude trusts the repo
+        subprocess.run(
+            ["git", "-C", str(project_dir), "commit", "--allow-empty", "-m", "init"],
+            capture_output=True,
+        )
+
+    # .claude/settings.json with hooks
+    claude_dir = project_dir / ".claude"
+    claude_dir.mkdir(exist_ok=True)
+    settings = claude_dir / "settings.json"
+    settings.write_text(json.dumps(_hooks_json(), indent=2) + "\n")
+
+    # CLAUDE.md — DIRECTOR gets its own template, workers get session template
+    claude_md = project_dir / "CLAUDE.md"
+    swarm_dir = MYCO_DIR.parent / "swarm"
+    if name == "DIRECTOR":
+        template = swarm_dir / "director-CLAUDE.md"
+    else:
+        template = swarm_dir / "session-CLAUDE.md"
+    if template.exists():
+        claude_md.write_text(template.read_text())
+    else:
+        print(f"  AVISO: template não encontrado em {template}", file=sys.stderr)
+
+
+def _create_peer_links(sessions: dict):
+    """Create peers/ dir in each project with symlinks to sibling sessions."""
+    for name, path_str in sessions.items():
+        if name == "DIRECTOR":
+            continue
+        project_dir = Path(path_str)
+        peers_dir = project_dir / "peers"
+        peers_dir.mkdir(exist_ok=True)
+        for other_name, other_path in sessions.items():
+            if other_name == name or other_name == "DIRECTOR":
+                continue
+            link = peers_dir / other_name
+            target = Path(other_path)
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(target)
+
+
+def cmd_setup(args):
+    """Setup swarm dir + session working dirs."""
+    swarm = args.swarm
+
+    # Create swarm structure
+    for d in ("log", "view", "msg", "dispatch", "responses", "sessions"):
+        (swarm / d).mkdir(parents=True, exist_ok=True)
+
+    state = _load_state(swarm)
+
+    if not args.sessions:
+        print("uso: myco setup SESSAO:/caminho [SESSAO:/caminho ...]", file=sys.stderr)
+        sys.exit(2)
+
+    for spec in args.sessions:
+        if ":" not in spec:
+            print(f"formato inválido: {spec!r} (esperado NOME:/caminho)", file=sys.stderr)
+            sys.exit(2)
+        name, path_str = spec.split(":", 1)
+        name = name.upper()
+        project_dir = Path(path_str).resolve()
+
+        print(f"  {name} → {project_dir}")
+        _setup_session_dir(name, project_dir, swarm)
+        state["sessions"][name] = str(project_dir)
+
+    # DIRECTOR is always created automatically
+    if "DIRECTOR" not in state["sessions"]:
+        director_dir = swarm / "director"
+        print(f"  DIRECTOR → {director_dir}")
+        _setup_session_dir("DIRECTOR", director_dir, swarm)
+        state["sessions"]["DIRECTOR"] = str(director_dir)
+
+    _save_state(swarm, state)
+
+    # Create peers/ symlinks so each session can access siblings' code
+    _create_peer_links(state["sessions"])
+
+    workers = [n for n in state["sessions"] if n != "DIRECTOR"]
+    print(f"\nSwarm: {swarm}")
+    print(f"Sessões: DIRECTOR + {', '.join(workers)}")
+    print(f"\nPróximos passos:")
+    print(f"  myco daemon          # terminal 1")
+    print(f"  myco session DIRECTOR # terminal 2 (você)")
+    for i, name in enumerate(workers):
+        print(f"  myco session {name:<8} # terminal {i + 3}")
+
+
+def cmd_daemon(args):
+    """Start the daemon."""
+    swarm = args.swarm
+    if not (swarm / "log").is_dir():
+        print(f"swarm dir não inicializado: {swarm}", file=sys.stderr)
+        print(f"rode: myco setup ...", file=sys.stderr)
+        sys.exit(1)
+
+    cmd = [sys.executable, str(MYCO_DIR / "mycod.py"), str(swarm)]
+    if args.quiet:
+        cmd.append("-q")
+    if args.port:
+        cmd.extend(["--port", str(args.port)])
+    print(f"[myco] daemon: {swarm}", file=sys.stderr)
+    os.execvp(cmd[0], cmd)
+
+
+def cmd_session(args):
+    """Launch an interactive Claude session."""
+    swarm = args.swarm
+    state = _load_state(swarm)
+    name = args.name.upper()
+
+    project_dir = state.get("sessions", {}).get(name)
+    if not project_dir:
+        # Auto-create DIRECTOR if swarm exists
+        if name == "DIRECTOR" and (swarm / "log").is_dir():
+            director_dir = swarm / "director"
+            print(f"[myco] criando DIRECTOR em {director_dir}", file=sys.stderr)
+            _setup_session_dir("DIRECTOR", director_dir, swarm)
+            state.setdefault("sessions", {})["DIRECTOR"] = str(director_dir)
+            _save_state(swarm, state)
+            project_dir = str(director_dir)
+        else:
+            print(f"sessão {name!r} não encontrada.", file=sys.stderr)
+            print(f"sessões disponíveis: {', '.join(state.get('sessions', {}).keys()) or 'nenhuma'}", file=sys.stderr)
+            sys.exit(1)
+
+    env = os.environ.copy()
+    env["MYCO_SESSION"] = name
+    env["MYCO_SWARM"] = str(swarm)
+    env["MYCO_INJECT_VIEW"] = "1"
+    if args.port:
+        env["MYCO_URL"] = f"http://localhost:{args.port}"
+
+    cmd = ["claude"]
+    if args.model:
+        cmd.extend(["--model", args.model])
+
+    print(f"[myco] {name} @ {project_dir}", file=sys.stderr)
+    os.chdir(project_dir)
+    os.execvpe(cmd[0], cmd, env)
+
+
+def cmd_dispatch(args):
+    """Send a prompt to a worker."""
+    swarm = args.swarm
+    name = args.name.upper()
+    prompt = " ".join(args.prompt)
+
+    # Try HTTP first
+    result = _http_post(f"/dispatch/{name}", {"prompt": prompt})
+    if result:
+        print(f"[myco] → {name} (HTTP): {prompt[:80]}{'...' if len(prompt) > 80 else ''}", file=sys.stderr)
+        return
+
+    dispatch_dir = swarm / "dispatch"
+    dispatch_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = dispatch_dir / f"{name}.prompt"
+    prompt_file.write_text(prompt)
+    print(f"[myco] → {name}: {prompt[:80]}{'...' if len(prompt) > 80 else ''}", file=sys.stderr)
+
+
+def cmd_worker(args):
+    """Start a worker daemon for a session."""
+    swarm = args.swarm
+    state = _load_state(swarm)
+    name = args.name.upper()
+
+    project_dir = state.get("sessions", {}).get(name)
+    if not project_dir:
+        print(f"sessão {name!r} não encontrada.", file=sys.stderr)
+        sys.exit(1)
+
+    cmd = [
+        sys.executable, str(MYCO_DIR / "myco_worker.py"),
+        name, project_dir, "--swarm", str(swarm),
+    ]
+    if args.model:
+        cmd.extend(["--model", args.model])
+
+    print(f"[myco] worker {name} @ {project_dir}", file=sys.stderr)
+    os.execvp(cmd[0], cmd)
+
+
+def _http_get(path: str) -> str:
+    """GET from MYCO_URL + path. Returns response body or "" on failure."""
+    url = os.environ.get("MYCO_URL")
+    if not url:
+        return ""
+    try:
+        req = urllib.request.Request(f"{url}{path}")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                return resp.read().decode("utf-8")
+    except Exception:
+        pass
+    return ""
+
+
+def _http_post(path: str, data: dict) -> str:
+    """POST JSON to MYCO_URL + path. Returns response body or "" on failure."""
+    url = os.environ.get("MYCO_URL")
+    if not url:
+        return ""
+    try:
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            f"{url}{path}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                return resp.read().decode("utf-8")
+    except Exception:
+        pass
+    return ""
+
+
+def cmd_view(args):
+    """Show the current view for a session."""
+    swarm = args.swarm
+    name = args.name.upper()
+
+    # Try HTTP first
+    result = _http_get(f"/view/{name}")
+    if result:
+        print(result)
+        return
+
+    # Try cached view file
+    view_file = swarm / "view" / f"{name}.md"
+    if view_file.exists():
+        print(view_file.read_text())
+        return
+
+    # Render on-demand (no daemon needed)
+    try:
+        sys.path.insert(0, str(MYCO_DIR))
+        from mycod import SwarmIndex, render_view, parse_event
+        index = SwarmIndex()
+        log_dir = swarm / "log"
+        if log_dir.is_dir():
+            for log_file in sorted(log_dir.glob("*.log")):
+                sess = log_file.stem
+                for line in log_file.read_text(errors="replace").splitlines():
+                    ev = parse_event(sess, line)
+                    if ev:
+                        index.apply(ev)
+        index.sessions_known.add(name)
+        session_dirs = _load_state(swarm).get("sessions", {})
+        print(render_view(index, name, swarm_dir=swarm, session_dirs=session_dirs))
+    except Exception as e:
+        print(f"erro ao renderizar view: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_status(args):
+    """Show swarm status."""
+    swarm = args.swarm
+
+    # Try HTTP first
+    result = _http_get("/status")
+    if result:
+        try:
+            data = json.loads(result)
+            sessions = data.get("sessions", {})
+            print(f"Swarm: {swarm} (via HTTP)")
+            print(f"\nSessões ({len(sessions)}):")
+            for name, info in sorted(sessions.items()):
+                st = info.get("status", "unknown")
+                ac = info.get("action", "")
+                bl = ", ".join(info.get("blockers", [])) or "—"
+                print(f"  {name:<10} status={st}  action={ac}  blockers={bl}")
+            return
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    state = _load_state(swarm)
+
+    print(f"Swarm: {swarm}")
+    sessions = state.get("sessions", {})
+    if not sessions:
+        print("Nenhuma sessão configurada.")
+        return
+
+    print(f"\nSessões ({len(sessions)}):")
+    for name, path in sorted(sessions.items()):
+        log_file = swarm / "log" / f"{name}.log"
+        view_file = swarm / "view" / f"{name}.md"
+        log_lines = 0
+        if log_file.exists():
+            log_lines = len(log_file.read_text().splitlines())
+        view_exists = "sim" if view_file.exists() else "não"
+        print(f"  {name:<10} dir={path}  log={log_lines} eventos  view={view_exists}")
+
+    # Check daemon
+    daemon_pid = None
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"mycod.py.*{swarm}"],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip():
+            daemon_pid = result.stdout.strip().split()[0]
+    except Exception:
+        pass
+    print(f"\nDaemon: {'rodando (PID {})'.format(daemon_pid) if daemon_pid else 'parado'}")
+
+
+def cmd_teardown(args):
+    """Clean up swarm state (keep project dirs)."""
+    swarm = args.swarm
+    if not swarm.exists():
+        print(f"nada para limpar: {swarm}", file=sys.stderr)
+        return
+
+    for d in ("log", "view", "msg", "dispatch", "responses", "sessions"):
+        target = swarm / d
+        if target.is_dir():
+            shutil.rmtree(target)
+            target.mkdir()
+    state_file = _state_path(swarm)
+    if state_file.exists():
+        # Keep sessions config, just clean runtime data
+        pass
+    print(f"[myco] limpo: {swarm} (diretórios de sessão mantidos)")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="myco",
+        description="CLI do swarm myco",
+    )
+    parser.add_argument(
+        "--swarm", type=Path, default=DEFAULT_SWARM,
+        help=f"diretório do swarm (default: $MYCO_SWARM ou {DEFAULT_SWARM})",
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    # setup
+    p = sub.add_parser("setup", help="inicializa swarm + sessões")
+    p.add_argument("sessions", nargs="*", help="SESSAO:/caminho (ex: AUTH:/tmp/teste1)")
+
+    # daemon
+    p = sub.add_parser("daemon", help="inicia o daemon")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--port", type=int, help="porta HTTP (sem ela, usa polling filesystem)")
+
+    # session
+    p = sub.add_parser("session", help="abre sessão Claude interativa")
+    p.add_argument("name", help="nome da sessão (ex: AUTH)")
+    p.add_argument("--model", help="modelo (ex: sonnet, opus)")
+    p.add_argument("--port", type=int, help="porta do daemon HTTP (seta MYCO_URL)")
+
+    # dispatch
+    p = sub.add_parser("dispatch", help="envia prompt pra worker")
+    p.add_argument("name", help="sessão destino")
+    p.add_argument("prompt", nargs="+", help="o prompt")
+
+    # worker
+    p = sub.add_parser("worker", help="inicia worker daemon")
+    p.add_argument("name", help="sessão")
+    p.add_argument("--model", help="modelo")
+
+    # view
+    p = sub.add_parser("view", help="mostra view de uma sessão")
+    p.add_argument("name", help="sessão")
+
+    # status
+    sub.add_parser("status", help="mostra status do swarm")
+
+    # teardown
+    sub.add_parser("teardown", help="limpa dados do swarm")
+
+    args = parser.parse_args()
+    if not args.cmd:
+        parser.print_help()
+        sys.exit(0)
+
+    cmds = {
+        "setup": cmd_setup,
+        "daemon": cmd_daemon,
+        "session": cmd_session,
+        "dispatch": cmd_dispatch,
+        "worker": cmd_worker,
+        "view": cmd_view,
+        "status": cmd_status,
+        "teardown": cmd_teardown,
+    }
+    cmds[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

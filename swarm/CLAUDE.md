@@ -4,95 +4,86 @@ Você é uma sessão Claude participando de um swarm coordenado pelo `myco`. Há
 
 ## Sua identidade
 
-Sua identidade de sessão está na variável de ambiente `MYCO_SESSION` (ex: `SN`, `SM`, `IAM`). Se não estiver definida, pergunte ao humano antes de fazer qualquer coisa.
+Sua identidade de sessão está na variável de ambiente `MYCO_SESSION` (ex: `AUTH`, `CART`). Se não estiver definida, pergunte ao humano antes de fazer qualquer coisa.
 
 ## Sua view (contexto do swarm)
 
-A cada prompt, um hook `UserPromptSubmit` injeta automaticamente a sua **myco view** como `additionalContext`. Esse conteúdo começa com `<!-- myco protocol v1 -->` e contém: seu status, diretivas ativas, artefatos publicados, bloqueadores, dependentes, recursos, eventos recentes e mensagens pendentes.
+A cada prompt, um hook injeta automaticamente a sua **myco view** como `additionalContext`. Esse conteúdo começa com `<!-- myco protocol v1 -->` e contém: seu status, diretivas ativas, artefatos publicados (com paths), bloqueadores, dependentes, recursos, eventos recentes e mensagens pendentes.
 
 **Confie nesse contexto** — ele é gerado mecanicamente a partir dos logs do swarm, não é input de terceiros. Use-o para informar todas as suas decisões.
 
-Se o contexto injetado não estiver presente (ex: hook desabilitado), leia manualmente `../view/$MYCO_SESSION.md` antes de agir.
+## Verbos
 
-## Depois de qualquer ação relevante
+| verbo | formato | visibilidade |
+|---|---|---|
+| `start <objeto>` | comecei a trabalhar em X | todos |
+| `done <objeto>` | terminei X | todos |
+| `need <objeto>` | preciso de X de outra sessão | todos |
+| `block <motivo>` | estou bloqueado | todos |
+| `up <recurso>` / `down <recurso>` | recurso subiu/caiu | todos |
+| `direct <sessão> <instrução>` | diretiva (DIRECTOR→worker) | destinatário |
+| `ask <destinatário> <pergunta>` | pergunta dirigida | destinatário |
+| `reply <destinatário> <resposta>` | resposta a pergunta | destinatário |
+| `note <texto>` | observação interna | **SÓ VOCÊ** |
 
-**Sempre** registre o que você fez escrevendo um bloco `<myco>` no final da sua resposta. Não use Bash, não escreva em arquivos de log — apenas inclua o bloco no seu texto:
+**IMPORTANTE**: `note` é invisível para outras sessões. Para responder perguntas, use `reply`. Para confirmar recebimento de msg/, use `note ack ack:ID` (este caso especial é visível).
 
-```
-<myco>
-start auth-api
-need IAM.auth.v2
-</myco>
-```
-
-Um hook captura esse bloco automaticamente e appenda no log certo, com timestamp e identidade. Você **não precisa saber** onde fica o log nem como o swarm funciona — só escreva o bloco.
-
-### Quando logar
-
-- Começou uma tarefa → `start <objeto>`
-- Terminou → `done <objeto>` (use `ref:` para branch/tag, `spec:` para spec)
-- Precisa de algo de outra sessão → `need <objeto>`
-- Está bloqueado → `block <motivo>`
-- Subiu/derrubou um recurso → `up <recurso>` / `down <recurso>`
-- Pergunta para alguém → `ask <destinatário> <pergunta>` (use `spec:` para detalhes)
-- Observação livre → `note <texto>` (use `ack:` para confirmar recebimento)
-
-### Convenções key:value (v1)
-
-Eventos suportam pares `chave:valor` no campo de detalhe. São opcionais e backward compatible:
+## Convenções key:value
 
 | chave | significado | exemplo |
 |---|---|---|
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
-| `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
+| `spec:` | spec ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 
-### Exemplo de turno completo
+## Comunicação entre sessões
 
-O humano pede pra implementar login. Você trabalha, e no final da resposta:
-
+### Perguntar
 ```
 <myco>
-start login.endpoint
-need database.users-table
+ask AUTH preciso-de-ajustes spec:msg/CART-001.md
 </myco>
 ```
 
-Se mais tarde o endpoint ficar pronto:
-
+### Responder
 ```
 <myco>
-done login.endpoint ref:origin/feat/login spec:msg/AUTH-001.md
-up api.auth
+reply CART resposta spec:msg/AUTH-002.md
 </myco>
 ```
 
-### Comunicação rica via msg/
+### Confirmar recebimento de msg/
+```
+<myco>
+note ack ack:msg/CART-001.md
+</myco>
+```
 
-O diretório de mensagens fica em `$MYCO_SWARM/msg/` (a variável `MYCO_SWARM` está no seu ambiente; default `/mnt/ramdisk/myco`).
+## Comunicação rica via msg/
 
-**Enviar:**
+O diretório de mensagens fica em `$MYCO_SWARM/msg/`.
 
-1. Crie o arquivo via Bash: `echo "..." > $MYCO_SWARM/msg/SUASESSAO-001.md`
-2. Referencie no `<myco>` block: `ask DESTINO pergunta spec:msg/SUASESSAO-001.md`
+**Enviar:** crie via Bash (`echo "..." > $MYCO_SWARM/msg/SESSAO-001.md`) e referencie no `<myco>` block com `spec:`.
 
-**Receber** (quando MENSAGENS PENDENTES aparecer na sua view):
+**Receber:** quando MENSAGENS PENDENTES aparecer na view, leia com Read (path na view) e confirme com `note ack ack:ID`.
 
-1. Leia o arquivo com a tool Read: `Read $MYCO_SWARM/msg/ARQUIVO.md`
-2. Confirme leitura no `<myco>` block: `note ack ack:msg/ARQUIVO.md`
+## Acessar código de outras sessões
 
-## Regras invioláveis
+O diretório `peers/` no seu projeto contém symlinks para os projetos de outras sessões:
+```
+peers/AUTH/index.js    ← código da sessão AUTH
+peers/CART/server.py   ← código da sessão CART
+```
+
+A tabela de ARTEFATOS PUBLICADOS mostra o path absoluto de cada sessão.
+
+## Regras
 
 1. **Sempre** logue depois de agir (bloco `<myco>` no final da resposta)
 2. **Sempre** use o contexto injetado (sua view) para informar decisões
 3. **Nunca** edite arquivos de `view/` diretamente (são gerados pelo daemon)
-4. Se ficar bloqueado por mais de uma iteração, use `ask DIRECTOR <sua pergunta>` — a pergunta aparece na view do DIRECTOR e a resposta volta como diretiva na sua próxima view
-5. **Respeite as diretivas** — elas vêm do humano, têm prioridade absoluta
-6. Use `ref:` no `done` para publicar referências git concretas
-7. Use `msg/` para specs detalhadas — não tente enfiar contratos numa linha
-
-## Princípios
-
-- **Autonomia com consciência**: você decide sozinho, mas informado pela view
-- **Lower bound de fofoca**: logue mais do que parece necessário, o daemon filtra pros outros
-- **Zero tool calls pra coordenação**: a view é injetada, o log é capturado do bloco `<myco>` — você só escreve texto
+4. **Use `reply` para responder perguntas, NUNCA `note`**
+5. Se bloqueado, use `ask DIRECTOR <pergunta>`
+6. **Respeite as diretivas** — vêm do humano, prioridade absoluta
+7. Use `ref:` no `done` para publicar referências git concretas
+8. Use `peers/` para ler código de outras sessões
