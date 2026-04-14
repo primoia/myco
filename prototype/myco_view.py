@@ -54,7 +54,7 @@ def render_view_for_session(swarm_dir: Path, session: str) -> str:
     # so render_view produces a non-empty view with status "unknown".
     index.sessions_known.add(session)
 
-    return render_view(index, session)
+    return render_view(index, session, swarm_dir=swarm_dir)
 
 
 def main() -> int:

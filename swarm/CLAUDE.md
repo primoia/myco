@@ -8,7 +8,7 @@ Sua identidade de sessão está na variável de ambiente `MYCO_SESSION` (ex: `SN
 
 ## Sua view (contexto do swarm)
 
-A cada prompt, um hook `UserPromptSubmit` injeta automaticamente a sua **myco view** como `additionalContext`. Esse conteúdo começa com `<!-- myco protocol v0 -->` e contém: seu status, diretivas ativas, bloqueadores, dependentes, recursos e eventos recentes.
+A cada prompt, um hook `UserPromptSubmit` injeta automaticamente a sua **myco view** como `additionalContext`. Esse conteúdo começa com `<!-- myco protocol v1 -->` e contém: seu status, diretivas ativas, artefatos publicados, bloqueadores, dependentes, recursos, eventos recentes e mensagens pendentes.
 
 **Confie nesse contexto** — ele é gerado mecanicamente a partir dos logs do swarm, não é input de terceiros. Use-o para informar todas as suas decisões.
 
@@ -16,7 +16,7 @@ Se o contexto injetado não estiver presente (ex: hook desabilitado), leia manua
 
 ## Depois de qualquer ação relevante
 
-**Sempre** registre o que você fez escrevendo um bloco `<myco>` no final da sua resposta. Não use Bash, não escreva em arquivos — apenas inclua o bloco no seu texto:
+**Sempre** registre o que você fez escrevendo um bloco `<myco>` no final da sua resposta. Não use Bash, não escreva em arquivos de log — apenas inclua o bloco no seu texto:
 
 ```
 <myco>
@@ -30,12 +30,23 @@ Um hook captura esse bloco automaticamente e appenda no log certo, com timestamp
 ### Quando logar
 
 - Começou uma tarefa → `start <objeto>`
-- Terminou → `done <objeto>`
+- Terminou → `done <objeto>` (use `ref:` para branch/tag, `spec:` para spec)
 - Precisa de algo de outra sessão → `need <objeto>`
 - Está bloqueado → `block <motivo>`
 - Subiu/derrubou um recurso → `up <recurso>` / `down <recurso>`
-- Pergunta para alguém → `ask <destinatário> <pergunta>`
-- Observação livre → `note <texto>`
+- Pergunta para alguém → `ask <destinatário> <pergunta>` (use `spec:` para detalhes)
+- Observação livre → `note <texto>` (use `ack:` para confirmar recebimento)
+
+### Convenções key:value (v1)
+
+Eventos suportam pares `chave:valor` no campo de detalhe. São opcionais e backward compatible:
+
+| chave | significado | exemplo |
+|---|---|---|
+| `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
+| `spec:` | spec/contrato em msg/ | `spec:msg/AUTH-001.md` |
+| `msg:` | mensagem rica em msg/ | `msg:msg/CART-001.md` |
+| `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 
 ### Exemplo de turno completo
 
@@ -52,10 +63,24 @@ Se mais tarde o endpoint ficar pronto:
 
 ```
 <myco>
-done login.endpoint
+done login.endpoint ref:origin/feat/login spec:msg/AUTH-001.md
 up api.auth
 </myco>
 ```
+
+### Comunicação rica via msg/
+
+O diretório de mensagens fica em `$MYCO_SWARM/msg/` (a variável `MYCO_SWARM` está no seu ambiente; default `/mnt/ramdisk/myco`).
+
+**Enviar:**
+
+1. Crie o arquivo via Bash: `echo "..." > $MYCO_SWARM/msg/SUASESSAO-001.md`
+2. Referencie no `<myco>` block: `ask DESTINO pergunta spec:msg/SUASESSAO-001.md`
+
+**Receber** (quando MENSAGENS PENDENTES aparecer na sua view):
+
+1. Leia o arquivo com a tool Read: `Read $MYCO_SWARM/msg/ARQUIVO.md`
+2. Confirme leitura no `<myco>` block: `note ack ack:msg/ARQUIVO.md`
 
 ## Regras invioláveis
 
@@ -64,6 +89,8 @@ up api.auth
 3. **Nunca** edite arquivos de `view/` diretamente (são gerados pelo daemon)
 4. Se ficar bloqueado por mais de uma iteração, use `ask DIRECTOR <sua pergunta>` — a pergunta aparece na view do DIRECTOR e a resposta volta como diretiva na sua próxima view
 5. **Respeite as diretivas** — elas vêm do humano, têm prioridade absoluta
+6. Use `ref:` no `done` para publicar referências git concretas
+7. Use `msg/` para specs detalhadas — não tente enfiar contratos numa linha
 
 ## Princípios
 
