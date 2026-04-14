@@ -208,20 +208,34 @@ class TestSwarmIndexApply:
         assert len(idx.questions) == 1
         assert idx.questions[0] == ("T0", "CART", "AUTH", "como integrar?")
 
+    def test_ask_sets_status_from_unknown(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("CART", "T0 CART ask AUTH como?"))
+        assert idx.session_status["CART"] == "active"
+        assert idx.session_action["CART"] == "ask AUTH"
+
+    def test_ask_doesnt_overwrite_active(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("CART", "T0 CART start cart-module"))
+        idx.apply(self._ev("CART", "T1 CART ask AUTH como?"))
+        assert idx.session_status["CART"] == "active"
+        assert idx.session_action["CART"] == "start cart-module"
+
     def test_ask_with_spec_registers_msg_target(self):
         idx = SwarmIndex()
         idx.apply(self._ev("CART", "T0 CART ask AUTH need-help spec:msg/CART-001.md"))
         assert idx.msg_targets["msg/CART-001.md"] == "AUTH"
 
-    def test_ask_with_msg_registers_msg_target(self):
+    def test_ask_with_msg_not_tracked(self):
+        """msg: key is no longer tracked — only spec: works."""
         idx = SwarmIndex()
         idx.apply(self._ev("CART", "T0 CART ask AUTH details msg:msg/CART-002.md"))
-        assert idx.msg_targets["msg/CART-002.md"] == "AUTH"
+        assert "msg/CART-002.md" not in idx.msg_targets
 
     def test_note_basic(self):
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH note observacao"))
-        assert idx.session_status["AUTH"] == "idle"
+        assert idx.session_status["AUTH"] == "active"
 
     def test_note_doesnt_overwrite_active(self):
         idx = SwarmIndex()
@@ -711,6 +725,47 @@ class TestBackwardCompat:
         assert len(idx.artifacts) == 2
         assert idx.artifacts[0]["ref"] == ""
         assert idx.artifacts[1]["ref"] == "origin/main"
+
+
+# ============================================================
+# Question cleanup (ack resolves questions)
+# ============================================================
+
+class TestQuestionCleanup:
+    def test_acked_question_disappears_from_view(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH help spec:msg/CART-001.md"))
+        idx.sessions_known.add("AUTH")
+        # Before ack: question visible
+        view = render_view(idx, "AUTH")
+        assert "CART" in view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+
+        # After ack: question disappears
+        idx.apply(parse_event("AUTH", "T1 AUTH note ok ack:msg/CART-001.md"))
+        view2 = render_view(idx, "AUTH")
+        perguntas = view2.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+        assert "Nenhuma." in perguntas
+
+    def test_question_without_spec_persists(self):
+        """Questions without spec: should never be auto-resolved."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH como integrar?"))
+        idx.sessions_known.add("AUTH")
+        view = render_view(idx, "AUTH")
+        perguntas = view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+        assert "como integrar?" in perguntas
+
+    def test_ack_only_resolves_matching_spec(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("CART", "T0 CART ask AUTH q1 spec:msg/CART-001.md"))
+        idx.apply(parse_event("CART", "T1 CART ask AUTH q2 spec:msg/CART-002.md"))
+        # Ack only CART-001
+        idx.apply(parse_event("AUTH", "T2 AUTH note ok ack:msg/CART-001.md"))
+        idx.sessions_known.add("AUTH")
+        view = render_view(idx, "AUTH")
+        perguntas = view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+        assert "CART-001" not in perguntas
+        assert "CART-002" in perguntas
 
 
 # ============================================================

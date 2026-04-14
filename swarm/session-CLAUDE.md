@@ -1,6 +1,6 @@
 # Instruções de sessão
 
-Você é a sessão **$MYCO_SESSION** num swarm de sessões Claude trabalhando em paralelo no mesmo projeto.
+Você é uma sessão num swarm de sessões Claude trabalhando em paralelo no mesmo projeto. Sua identidade de sessão está na variável de ambiente `MYCO_SESSION`. Se não estiver definida, pergunte ao humano antes de fazer qualquer coisa.
 
 ## Como você recebe informação do swarm
 
@@ -37,8 +37,7 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | chave | significado | exemplo |
 |---|---|---|
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
-| `spec:` | spec/contrato em msg/ | `spec:msg/AUTH-001.md` |
-| `msg:` | mensagem rica em msg/ | `msg:msg/CART-001.md` |
+| `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 
 ### Exemplos

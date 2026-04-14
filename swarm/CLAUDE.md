@@ -44,8 +44,7 @@ Eventos suportam pares `chave:valor` no campo de detalhe. São opcionais e backw
 | chave | significado | exemplo |
 |---|---|---|
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
-| `spec:` | spec/contrato em msg/ | `spec:msg/AUTH-001.md` |
-| `msg:` | mensagem rica em msg/ | `msg:msg/CART-001.md` |
+| `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 
 ### Exemplo de turno completo

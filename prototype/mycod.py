@@ -101,6 +101,7 @@ class SwarmIndex:
         # v1: message tracking (msg/ directory)
         self.msg_acks = defaultdict(set)   # msg_id → sessions that acked
         self.msg_targets = {}              # msg_id → target session
+        self.answered_specs = set()        # spec ids that have been acked
 
     def apply(self, ev):
         s = ev["session"]
@@ -147,18 +148,23 @@ class SwarmIndex:
             self.directives.append((ev["ts"], obj, detail))
         elif verb == "ask":
             self.questions.append((ev["ts"], s, obj, detail))
-            # v1: track msg targets from spec: or msg: kvs
-            msg_id = kvs.get("spec") or kvs.get("msg")
+            # v1: track msg targets from spec: kvs
+            msg_id = kvs.get("spec")
             if msg_id:
                 self.msg_targets[msg_id] = obj  # obj = target session
+            # Session that asks is clearly active
+            if self.session_status.get(s) in (None, "unknown"):
+                self.session_status[s] = "active"
+                self.session_action[s] = f"ask {obj}"
         elif verb == "note":
-            # v1: track ack for messages
+            # v1: track ack for messages and resolve associated questions
             ack_id = kvs.get("ack")
             if ack_id:
                 self.msg_acks[ack_id].add(s)
-            # note events update last-seen but don't change semantic state
-            if s not in self.session_status:
-                self.session_status[s] = "idle"
+                self.answered_specs.add(ack_id)
+            # note events update last-seen but don't override active/blocked
+            if s not in self.session_status or self.session_status[s] == "unknown":
+                self.session_status[s] = "active"
                 self.session_action[s] = f"note {obj}"
 
     def satisfied(self, artifact: str) -> bool:
@@ -235,7 +241,7 @@ class SwarmIndex:
         for ev in self.events:
             if ev["verb"] == "ask":
                 kvs = ev.get("kvs", {})
-                msg_id = kvs.get("spec") or kvs.get("msg")
+                msg_id = kvs.get("spec")
                 if msg_id and self.msg_targets.get(msg_id) == session:
                     target_to_sender[msg_id] = ev["session"]
 
@@ -274,7 +280,18 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None) -> str:
     events = index.recent_events_for(session, limit=15)
     status = index.session_status.get(session, "unknown")
     action = index.session_action.get(session, "no recent action")
-    my_questions = [q for q in index.questions if q[1] == session or q[2] == session]
+    # Filter questions: only show those relevant to this session and not yet answered
+    my_questions = []
+    for q in index.questions:
+        ts, frm, to, detail = q
+        if frm != session and to != session:
+            continue
+        # Check if this question has a spec: that was acked
+        _, q_kvs = parse_detail_kvs(detail)
+        spec_id = q_kvs.get("spec")
+        if spec_id and spec_id in index.answered_specs:
+            continue
+        my_questions.append(q)
     msg_dir = swarm_dir / "msg" if swarm_dir else None
     pending_msgs = index.pending_msgs_for(session, msg_dir) if msg_dir else []
 
