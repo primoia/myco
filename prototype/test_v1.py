@@ -587,8 +587,9 @@ class TestRenderViewWorker:
         assert "De **CART**" in view
         assert "msg/CART-001.md" in view
         # Should include absolute path so Claude can Read it directly
-        assert str(msg_dir / "CART-001.md") in view
-        assert "curl $MYCO_URL/msg/CART-001.md" in view
+        assert "msg/CART-001.md" in view
+        assert "msg/CART-001.md?session=$MYCO_SESSION" in view
+        assert "ack automático" in view
 
     def test_no_pending_msgs(self):
         idx = SwarmIndex()
@@ -2098,6 +2099,33 @@ class TestQuestionTTL:
     def test_ttl_default_30min(self):
         from mycod import QUESTION_TTL_SECONDS
         assert QUESTION_TTL_SECONDS == 1800
+
+
+# ============================================================
+# Self-ask blocked
+# ============================================================
+
+class TestSelfAskBlocked:
+    def test_self_ask_ignored(self):
+        from mycod import SwarmIndex, parse_event
+        idx = SwarmIndex()
+        idx.apply(parse_event("FRONT", "T0 FRONT ask FRONT self-question"))
+        assert len(idx.questions) == 0
+
+    def test_self_ask_not_in_pending_questions(self):
+        from mycod import SwarmIndex, parse_event, render_view
+        idx = SwarmIndex()
+        idx.apply(parse_event("FRONT", "T0 FRONT ask FRONT self-question"))
+        view = render_view(idx, "FRONT")
+        # Should not appear in PERGUNTAS PENDENTES section
+        pending_section = view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+        assert "self-question" not in pending_section
+
+    def test_normal_ask_still_works(self):
+        from mycod import SwarmIndex, parse_event
+        idx = SwarmIndex()
+        idx.apply(parse_event("FRONT", "T0 FRONT ask BACK help-me"))
+        assert len(idx.questions) == 1
 
 
 if __name__ == "__main__":

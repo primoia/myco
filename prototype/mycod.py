@@ -159,6 +159,9 @@ class SwarmIndex:
         elif verb == "direct":
             self.directives.append((ev["ts"], obj, detail))
         elif verb == "ask":
+            # Ignore self-ask (target == sender) — pollutes pending questions
+            if obj == s:
+                return
             self.questions.append((ev["ts"], s, obj, detail))
             # v1: track msg targets from spec: kvs
             msg_id = kvs.get("spec")
@@ -554,7 +557,7 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
     lines.append("## MENSAGENS PENDENTES")
     if pending_msgs:
         for msg in pending_msgs:
-            lines.append(f"- De **{msg['sender']}**: `{msg['id']}` — leia com `curl $MYCO_URL/{msg['id']}` ou `Read {msg['path']}` e faça `note ack ack:{msg['id']}`")
+            lines.append(f"- De **{msg['sender']}**: `{msg['id']}` — leia com `curl -H \"Authorization: Bearer $MYCO_TOKEN\" \"$MYCO_URL/{msg['id']}?session=$MYCO_SESSION\"` (ack automático)")
     else:
         lines.append("Nenhuma mensagem pendente.")
     lines.append("")
