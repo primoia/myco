@@ -1,6 +1,6 @@
 # Exemplo: three-services
 
-Três projetos fictícios que se cruzam via API, operados por três sessões Claude em paralelo, coordenados por `myco`.
+Três projetos fictícios que se cruzam via API, operados por três sessões Claude em paralelo, coordenados por myco.
 
 ## Os três projetos
 
@@ -21,34 +21,20 @@ Três projetos fictícios que se cruzam via API, operados por três sessões Cla
 - `SM` publica `SM.api.messages` → desbloqueia `SN`
 - `SN` consome ambos
 
-## Como rodar (quando o daemon existir)
-
-Em três terminais:
+## Como rodar
 
 ```bash
-# terminal 1
-cd examples/three-services/IAM
-MYCO_SESSION=IAM claude
+# Terminal 1 — daemon
+python3 ~/myco/prototype/mycod.py --port 8000 /tmp/myco-swarm
 
-# terminal 2
-cd examples/three-services/SM
-MYCO_SESSION=SM claude
+# Terminal 2
+~/myco/myco IAM ./IAM
 
-# terminal 3
-cd examples/three-services/SN
-MYCO_SESSION=SN claude
-```
+# Terminal 3
+~/myco/myco SM ./SM
 
-Em um quarto terminal, o daemon:
-
-```bash
-myco daemon --swarm-dir /mnt/ramdisk/myco
-```
-
-Em um quinto terminal, você observa:
-
-```bash
-myco tail -f
+# Terminal 4
+~/myco/myco SN ./SN
 ```
 
 ## A feature imaginada
@@ -61,5 +47,5 @@ Isso exige:
 2. SM consumir o webhook e enfileirar mensagem
 3. SN ler da fila e disparar a notificação
 
-Sem `myco`: você media os três Claudes no olho.
-Com `myco`: os três se coordenam via declarações no log, e você só intervém se houver impasse.
+Sem myco: você media os três Claudes no olho.
+Com myco: os três se coordenam via declarações no log, e você só intervém se houver impasse.

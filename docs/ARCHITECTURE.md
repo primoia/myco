@@ -1,130 +1,192 @@
 # Arquitetura
 
-Esboço do daemon `myco` em Rust. Propositalmente minimalista.
+Daemon Python + hooks Claude Code. A implementação inteira vive em `prototype/`.
+
+## Visão geral
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                          mycod.py                                │
+│                                                                  │
+│  ┌───────────┐   ┌────────────┐   ┌──────────────────────────┐  │
+│  │  poller   │──▶│ SwarmIndex │──▶│       renderer           │  │
+│  │ (1ms fs)  │   │ (memória)  │   │ (markdown personalizado) │  │
+│  └───────────┘   └────────────┘   └───────────┬──────────────┘  │
+│        ▲              ▲  ▲                     │                │
+│        │              │  │                     ▼                │
+│  log/*.log    HTTP /events              view/*.md + cache       │
+│               (/msg, /view)                                     │
+│                                                                  │
+│  ┌───────────────────┐                                          │
+│  │  HTTP server      │  ← ThreadingHTTPServer (background)      │
+│  │  (porta 8000)     │                                          │
+│  └───────────────────┘                                          │
+└─────────────────────────────────────────────────────────────────┘
+         ▲                              │
+         │ POST /events                 │ GET /view/{S}
+         │ POST /msg/{F}               │ GET /msg/{F}
+         │                              ▼
+┌─────────────────┐              ┌─────────────────┐
+│   Stop hook     │              │  Prompt hook    │
+│ (myco-hook.py)  │              │ (myco_prompt_   │
+│                 │              │  hook.py)       │
+└────────┬────────┘              └────────┬────────┘
+         │ captura <myco>                 │ injeta view
+         │ blocks do transcript           │ como additionalContext
+         ▼                                ▼
+┌──────────────────────────────────────────────────┐
+│              Claude Code session                  │
+│  - lê view injetada no início de cada turno       │
+│  - escreve <myco> block no final de cada turno    │
+└──────────────────────────────────────────────────┘
+```
 
 ## Componentes
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      myco-daemon                        │
-│                                                         │
-│  ┌───────────┐   ┌──────────┐   ┌──────────────────┐    │
-│  │  watcher  │──▶│  index   │──▶│     renderer     │    │
-│  │ (notify)  │   │ (memória)│   │  (template+diff) │    │
-│  └───────────┘   └──────────┘   └────────┬─────────┘    │
-│        ▲              ▲                   │             │
-│        │              │                   ▼             │
-└────────┼──────────────┼───────────────────┼─────────────┘
-         │              │                   │
-    log/*.log      filter rules       view/*.md (atomic)
-```
+### 1. Daemon (`prototype/mycod.py`)
 
-### 1. `watcher`
+~1000 linhas de Python. Três responsabilidades:
 
-Usa o crate [`notify`](https://crates.io/crates/notify) para escutar `inotify` recursivamente em `log/`. Para cada mudança (append, criação de arquivo novo), emite um evento interno.
+**Poller** — varre `log/*.log` a cada 1ms, lê deltas via offset tracking, parseia eventos.
 
-### 2. `index`
+**SwarmIndex** — estado em memória do swarm:
 
-Estado em memória do swarm. Estrutura central:
-
-```rust
-struct SwarmIndex {
-    sessions: HashMap<SessionId, SessionState>,
-    events: VecDeque<Event>,           // ring buffer dos últimos N
-    resources: HashMap<ResourceId, ResourceState>,
-    declarations: Vec<Declaration>,    // needs ativos
-    directives: Vec<Directive>,        // diretivas ativas do DIRECTOR
-    pending_questions: Vec<Question>,
-    last_line_read: HashMap<SessionId, u64>,
-}
+```python
+class SwarmIndex:
+    session_status = {}        # sessão → "active"/"idle"/"blocked"
+    session_action = {}        # sessão → última ação ("start login")
+    needs = defaultdict(set)   # sessão → set de dependências
+    provides = defaultdict(set) # sessão → set de artefatos publicados
+    resources = {}             # "container iam-db" → "UP"/"DOWN"
+    directives = []            # (ts, target, text)
+    questions = []             # (ts, from, to, detail)
+    artifacts = []             # permanentes: {ts, session, obj, ref, spec}
+    broadcasts = []            # (ts, session, text) — say verb
+    last_seen = {}             # sessão → timestamp
+    msg_acks = defaultdict(set)    # msg_id → sessions que confirmaram
+    resolved_questions = set()      # (from, to, ts) resolvidos por reply
+    events = deque(maxlen=2000)     # ring buffer
 ```
 
-Cada evento novo passa por um parser simples (regex sobre `<ts> <sessao> <verbo> ...`) e atualiza o índice de acordo com o verbo.
+**Renderer** — gera views markdown personalizadas por sessão. Cada sessão tem filtros de visibilidade aplicados.
 
-### 3. `renderer`
+**HTTP server** — `ThreadingHTTPServer` rodando em thread background:
 
-Para cada sessão, aplica as regras de filtro e gera o conteúdo de `view/$X.md` usando templates (`tera` ou `handlebars` ou `format!` direto — vamos pelo mais simples).
+| Endpoint | Método | Auth | Descrição |
+|---|---|---|---|
+| `/healthz` | GET | Não | Health check (uptime, session count) |
+| `/view/{SESSION}` | GET | Sim | View renderizada (do cache em memória) |
+| `/events` | POST | Sim | Ingestão de eventos (JSON: `{session, events}`) |
+| `/msg/{FILE}` | GET | Sim | Leitura de mensagem (`?session=` auto-ack) |
+| `/msg/{FILE}` | POST | Sim | Criação de mensagem (imutável, max 64KB) |
+| `/status` | GET | Sim | Estado JSON de todas as sessões |
+| `/dispatch/{SESSION}` | POST | Sim | Despacho de prompt headless |
 
-Escreve via temp+rename para garantir atomicidade das leituras.
+### 2. Stop hook (`prototype/myco-hook.py`)
 
-### 4. `filter rules`
+Disparado pelo Claude Code quando Claude termina um turno. Fluxo:
 
-V0: código Rust puro, regras hard-coded, descritas em [`PROTOCOL.md#regras-de-filtro-v0-manuais`](PROTOCOL.md#regras-de-filtro-v0-manuais).
+1. Recebe payload JSON via stdin (inclui `transcript_path`)
+2. Lê o transcript JSONL e extrai o texto do último turno do assistant
+3. Busca o último bloco `<myco>...</myco>` no texto
+4. Parseia as linhas de eventos (verbo + objeto + detalhes)
+5. POST `/events` no daemon via HTTP (2 tentativas, 100ms entre elas)
+6. Fallback: append direto no `log/{SESSION}.log` se HTTP falhar
 
-V1 (futuro): regras expressas em um arquivo TOML/RON simples, carregado no boot, hot-reload em mudança.
+**Race condition handling**: o transcript pode não estar flushed quando o hook dispara. O hook faz polling por até 500ms esperando o texto do assistant aparecer.
 
-V2 (longe): heurística que ajusta regras baseado em uso real — linhas mostradas mas nunca causadoras de ação viram candidatas a silenciamento.
+### 3. Prompt hook (`prototype/myco_prompt_hook.py`)
 
-## Dependências (crates)
+Disparado pelo Claude Code antes de cada prompt do usuário. Fluxo:
 
-Mínimas e maduras:
+1. Verifica `MYCO_INJECT_VIEW=1` (opt-in)
+2. Ignora slash commands (`/clear`, `/help`, etc.)
+3. GET `/view/{SESSION}` do daemon via HTTP (2 tentativas)
+4. Fallback: renderiza a view localmente via `myco_view.py`
+5. Imprime a view em stdout → Claude Code injeta como `additionalContext`
 
-- `notify` — inotify
-- `tokio` — runtime assíncrono (só para watcher + writer)
-- `serde` + `toml` — config (se precisar)
-- `tempfile` — para escrita atômica
-- `chrono` — parsing de timestamps
-- `anyhow` + `thiserror` — erros
+**Contrato**: nunca bloqueia o prompt do usuário. Qualquer erro → silent no-op.
 
-Nada exótico. Tudo compila offline, binário estático <5MB.
+### 4. Launcher (`myco`)
 
-## Ciclo de eventos
+Script bash na raiz do repo. Automatiza o setup completo de uma sessão:
 
-```
-┌──────────────────────────────────────────────────────┐
-│ 1. inotify dispara: log/SN.log cresceu               │
-│ 2. watcher lê as linhas novas desde last_line_read   │
-│ 3. parser converte cada linha em Event               │
-│ 4. index.apply(event) atualiza estado                │
-│ 5. renderer identifica quais views foram afetadas    │
-│ 6. renderer reescreve view/X.md.tmp                  │
-│ 7. rename view/X.md.tmp → view/X.md                  │
-│ 8. repete para cada view afetada                     │
-└──────────────────────────────────────────────────────┘
-```
-
-Latência alvo: **menos de 1ms** entre append no log e view atualizada, no ramdisk.
-
-## Persistência
-
-Zero. O daemon é stateless por design. Se ele morrer, basta reiniciar — ele reconstrói o índice lendo todos os `log/*.log` do início.
-
-Para rotação/compaction, um comando `myco compact` pode ser implementado depois. V0 confia que a execução cabe na sessão de trabalho (horas, não dias).
-
-## CLI
-
-```
-myco daemon       # sobe o daemon em foreground
-myco daemon -d    # sobe em background
-myco status       # imprime visão geral do swarm (lê o índice via socket)
-myco tail [SESSAO] # live tail do log agregado
-myco view SESSAO  # imprime view/$SESSAO.md (só um cat, mas padronizado)
-myco compact      # compacta logs antigos (futuro)
+```bash
+./myco <SESSION> [project_dir] [--resume] [-- claude_flags...]
 ```
 
-## Conexão com as sessões Claude
+O que faz:
+1. Copia `CLAUDE.md` para o projeto alvo (sempre sincroniza)
+2. Cria `.claude/settings.json` com os hooks apontando para o repo myco
+3. Exporta `MYCO_SESSION`, `MYCO_INJECT_VIEW=1`, `MYCO_URL`
+4. Executa `claude` no diretório do projeto
 
-O daemon **não conversa** com as sessões Claude. A única ponte é o filesystem:
+## Modo híbrido (HTTP + filesystem)
 
-- Sessão escreve em `log/X.log` via Bash tool (`echo >>`)
-- Sessão lê `view/X.md` via Read tool
+O daemon opera em **modo híbrido** quando `--port` é especificado:
 
-Isso é uma escolha deliberada. Nenhuma sessão precisa saber que o daemon existe. Se o daemon cair, as sessões continuam vendo a última versão das views (ficam estáticas, mas não quebram). Quando o daemon volta, ele reindexa e atualiza.
+- **Thread principal**: poll loop a 1ms no filesystem (detecta logs escritos por fallback)
+- **Thread background**: HTTP server (recebe eventos via POST, serve views via GET)
 
-## Observabilidade
+Eventos recebidos via HTTP são:
+1. Persistidos no `log/{SESSION}.log`
+2. Processados no SwarmIndex
+3. Offset do arquivo avançado (para que o poll loop não reprocesse)
 
-- `myco tail -f` — live tail colorido dos eventos
-- `myco status` — tabela do estado atual de cada sessão e recurso
-- Logs do próprio daemon em `/tmp/myco-daemon.log`
+Isso garante que:
+- Eventos HTTP e filesystem nunca são duplicados
+- Se o HTTP cair, sessões fazem fallback para filesystem
+- Se alguém appenda diretamente no log, o daemon detecta no próximo poll
 
-Sem métricas Prometheus, sem tracing distribuído. É um projeto local.
+## Autenticação
 
-## Fases de implementação
+Bearer token via variável `MYCO_TOKEN`:
 
-1. **Fase 0 — validação em shell**: antes de escrever Rust, validar o protocolo com scripts bash + `inotifywait` + `awk`. Quando o protocolo estiver estável, aí Rust.
-2. **Fase 1 — daemon monolítico**: tudo junto, uma thread, sem socket, só reescreve arquivos.
-3. **Fase 2 — CLI com socket**: `myco status` e `myco tail` via Unix socket local.
-4. **Fase 3 — filtro configurável**: regras em TOML com hot-reload.
-5. **Fase 4 — aprendizado heurístico**: silenciamento automático de ruído.
+- Se `MYCO_TOKEN` está definido no daemon, todas as rotas (exceto `/healthz`) exigem `Authorization: Bearer <token>`
+- Se não está definido, sem autenticação (modo local)
+- Hooks incluem o token automaticamente nas requests
 
-Fase 0 é onde começa.
+## Segurança
+
+- **Tag sanitization**: GET `/msg/` escapa tags perigosas (`<system-reminder>`, `<command-*>`, `<`, etc.) para prevenir prompt injection via mensagens entre sessões
+- **Imutabilidade**: POST `/msg/` retorna 409 se o arquivo já existe
+- **Size limit**: POST `/msg/` retorna 413 se payload > 64KB
+- **Path traversal**: filenames com `/` ou `..` são rejeitados
+- **Self-ask prevention**: `ask TARGET` onde target == sender é ignorado
+
+## Stateless by design
+
+O daemon é **stateless**. Se morrer e reiniciar:
+
+1. Relê todos os `log/*.log` do início
+2. Reconstrói o SwarmIndex completo
+3. Re-renderiza todas as views
+
+Nada é perdido. A fonte da verdade é o filesystem.
+
+Hooks não mantêm conexões persistentes — cada prompt/turno faz requests HTTP independentes. Reinício do daemon é transparente para as sessões.
+
+## Escrita atômica
+
+Views são escritas via `tempfile.mkstemp` + `os.replace`:
+
+```
+1. escreve em view/.FRONT.md.xxxxx.tmp
+2. os.replace(.tmp → view/FRONT.md)   ← atômico no Linux
+```
+
+Leitores nunca veem estado parcial.
+
+## Performance
+
+Números da validação (Fase 0, Python não otimizado):
+
+| Métrica | Valor |
+|---|---|
+| Latência log→view (p50) | 1.84ms |
+| Latência log→view (p99) | 2.31ms |
+| 150 eventos concorrentes | 6.92ms, zero corrupção |
+| RSS do daemon (ocioso) | 4.4MB |
+| CPU (ocioso) | ~0% |
+
+A latência é dominada pelo intervalo de polling de 1ms. O trabalho real (parse + index + render) é sub-millisegundo.

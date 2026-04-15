@@ -1,179 +1,253 @@
-# Protocolo
+# Protocolo v1
 
-Especificação mínima do que uma sessão precisa saber para participar do swarm `myco`.
+Especificação do protocolo de coordenação myco.
 
-## Layout no ramdisk
+## Layout do swarm
 
 ```
-/mnt/ramdisk/myco/
-├── CLAUDE.md           # instruções universais (toda sessão lê no boot)
+/tmp/myco-swarm/           (ou qualquer diretório)
 ├── log/
-│   ├── SN.log          # só SN escreve
-│   ├── SM.log          # só SM escreve
-│   ├── IAM.log         # só IAM escreve
-│   └── DIRECTOR.log    # humano + sessão conselheira escrevem
-└── view/
-    ├── SN.md           # daemon escreve, SN lê
-    ├── SM.md           # daemon escreve, SM lê
-    ├── IAM.md          # daemon escreve, IAM lê
-    └── DIRECTOR.md     # daemon escreve, DIRECTOR lê
+│   ├── FRONT.log          # só FRONT escreve (via daemon)
+│   ├── BACK.log           # só BACK escreve (via daemon)
+│   ├── AUTH.log           # só AUTH escreve (via daemon)
+│   └── DIRECTOR.log       # humano + sessão conselheira
+├── view/
+│   ├── FRONT.md           # daemon escreve, FRONT recebe via hook
+│   ├── BACK.md            # daemon escreve, BACK recebe via hook
+│   ├── AUTH.md            # daemon escreve, AUTH recebe via hook
+│   └── DIRECTOR.md        # daemon escreve, DIRECTOR lê
+└── msg/
+    ├── FRONT-001.md       # mensagens ricas entre sessões
+    └── BACK-001.md
 ```
 
 **Regra de ouro**: cada arquivo tem exatamente um escritor.
 
-- Sessão `X` escreve **apenas** em `log/X.log`
-- Daemon escreve **apenas** em `view/*.md`
-- Ninguém nunca escreve em arquivo alheio
-
-Isso elimina 100% das condições de corrida por construção.
+- O daemon escreve em `log/*.log` (via HTTP POST ou filesystem append)
+- O daemon escreve em `view/*.md` (escrita atômica via rename)
+- Sessões escrevem em `msg/*.md` (via HTTP POST, imutáveis)
 
 ## Formato de log
 
-Uma linha = um evento. Texto puro. Sem YAML, sem JSON.
+Uma linha = um evento. Texto puro.
 
 ```
-<timestamp> <sessao> <verbo> <objeto> [<detalhes>]
+<timestamp> <sessão> <verbo> <objeto> [<detalhes>]
 ```
 
 Exemplos:
 
 ```
-2026-04-11T10:23:14.123 SN start build
-2026-04-11T10:23:15.007 SM need IAM.auth.v2
-2026-04-11T10:23:20.441 IAM up container iam-db
-2026-04-11T10:23:21.102 IAM done auth.v2
-2026-04-11T10:23:22.008 SN ask DIRECTOR deve usar cache ou não
-2026-04-11T10:23:45.000 DIRECTOR direct all usar JWT HS256
+2026-04-14T10:23:14 FRONT start login.endpoint
+2026-04-14T10:23:15 BACK need AUTH.auth.v2
+2026-04-14T10:23:20 AUTH done auth.v2 ref:origin/feat/new-auth
+2026-04-14T10:23:22 FRONT ask DIRECTOR preciso-de-specs spec:msg/FRONT-001.md
+2026-04-14T10:23:45 DIRECTOR direct all usar-JWT-HS256
+2026-04-14T10:24:00 AUTH reply BACK resposta-sobre-contrato spec:msg/AUTH-002.md
+2026-04-14T10:24:10 FRONT say vou-reiniciar-o-banco-em-1min
 ```
 
-### Verbos padronizados (vocabulário inicial)
+## Verbos
 
-| Verbo | Significado |
-|---|---|
-| `start` | começou a trabalhar em algo |
-| `done` | terminou algo, efeito publicado |
-| `need` | declara dependência (precondição) |
-| `block` | está bloqueado esperando algo |
-| `up` / `down` | recurso (container, endpoint) subiu/caiu |
-| `claim` | pegou tarefa pendente |
-| `release` | soltou tarefa sem terminar |
-| `ask` | pergunta dirigida a outra persona |
-| `direct` | diretiva (só DIRECTOR usa) |
-| `note` | observação livre, sem semântica de estado |
+| Verbo | Significado | Exemplo |
+|---|---|---|
+| `start` | comecei a trabalhar em X | `start login.endpoint` |
+| `done` | terminei X, efeito publicado | `done auth.v2 ref:origin/feat/new-auth` |
+| `need` | declaro dependência (precondição) | `need AUTH.auth.v2` |
+| `block` | estou bloqueado | `block esperando-deploy-do-db` |
+| `up` | recurso subiu | `up container iam-db` |
+| `down` | recurso caiu | `down endpoint /api/auth` |
+| `ask` | pergunta dirigida a outra sessão | `ask DIRECTOR preciso-de-specs` |
+| `reply` | resposta a uma pergunta | `reply BACK resposta spec:msg/AUTH-002.md` |
+| `say` | broadcast visível para TODAS as sessões | `say deploy-em-1min` |
+| `direct` | diretiva (só DIRECTOR usa) | `direct all usar-JWT-HS256` |
+| `note` | observação interna (invisível para outros) | `note ack ack:msg/CART-001.md` |
 
-O daemon entende esses verbos para construir o índice. Qualquer outra coisa é tratada como `note`.
+### Semântica especial
 
-## Escrevendo no log
+- **`ask`**: self-ask é rejeitado (target == sender → ignorado pelo daemon)
+- **`reply`**: resolve perguntas pendentes do target→sender e faz auto-ack de specs associados
+- **`say`**: aparece na seção BROADCASTS de todas as views
+- **`note`**: NUNCA visível para outras sessões — só serve para registros internos e acks
+- **`direct`**: aparece no topo de todas as views com prioridade máxima
 
-Append atômico:
+## Convenções key:value
+
+Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
+
+| Chave | Significado | Exemplo |
+|---|---|---|
+| `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
+| `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
+| `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
+
+Exemplo completo:
+
+```
+done auth-api-v2 ref:origin/feat/new-login spec:msg/AUTH-003.md
+```
+
+## Mensagens ricas (msg/)
+
+Para comunicação que não cabe numa linha de evento, sessões trocam arquivos markdown via HTTP.
+
+### Enviar
 
 ```bash
-echo "$(date -Iseconds) SN need IAM.auth.v2" >> /mnt/ramdisk/myco/log/SN.log
+curl -X POST -H "Authorization: Bearer $MYCO_TOKEN" \
+  -d "conteúdo da mensagem" \
+  $MYCO_URL/msg/SUASESSAO-001.md
 ```
 
-Como a linha é menor que 4KB e o modo é `O_APPEND`, o kernel Linux garante atomicidade entre processos. Zero lock necessário.
+Depois, referencie no bloco `<myco>`:
+
+```
+ask DESTINO pergunta-sobre-contrato spec:msg/SUASESSAO-001.md
+```
+
+### Receber
+
+Quando a seção **MENSAGENS PENDENTES** da view mostrar uma mensagem:
+
+```bash
+curl -H "Authorization: Bearer $MYCO_TOKEN" \
+  "$MYCO_URL/msg/ARQUIVO.md?session=$MYCO_SESSION"
+```
+
+O parâmetro `?session=` faz ack automático — a mensagem sai de pendentes na próxima renderização.
+
+### Regras de msg/
+
+- Mensagens são **imutáveis**: POST em arquivo existente retorna 409
+- Tamanho máximo: **64KB** (413 em excesso)
+- Tags perigosas (`<system-reminder>`, `<command-*>`, etc.) são sanitizadas na leitura
+- Convenção de nomes: `SESSAO-NNN.md` (ex: `FRONT-001.md`, `AUTH-002.md`)
+
+## Como sessões se comunicam
+
+### Escrevendo eventos — blocos `<myco>`
+
+Sessões NÃO escrevem diretamente em arquivos de log. Em vez disso, Claude inclui um bloco no texto da resposta:
+
+```
+<myco>
+start login.endpoint
+need AUTH.auth.v2
+</myco>
+```
+
+Um **Stop hook** (`myco-hook.py`) captura este bloco do transcript e envia os eventos ao daemon via HTTP POST. Se HTTP falhar, faz fallback para append no filesystem.
+
+Regras do bloco:
+- Uma linha = um evento
+- Formato: `<verbo> <obj> [detail...]`
+- Linhas em branco e comentários (`# ...`) são ignorados
+- Se houver vários blocos `<myco>` no mesmo turno, **o último ganha**
+- Linhas com verbo desconhecido são silenciosamente ignoradas
+
+### Recebendo contexto — injeção automática
+
+Um **hook UserPromptSubmit** (`myco_prompt_hook.py`) injeta a view da sessão como `additionalContext` a cada prompt. A sessão nunca precisa fazer Read tool calls para consultar o swarm — o contexto chega sozinho.
+
+A view é obtida via HTTP GET `/view/{SESSION}`, com fallback para renderização local via filesystem.
 
 ## Formato de view
 
-Markdown estruturado, escrito pelo daemon, sempre com o mesmo esqueleto:
+Markdown estruturado, gerado pelo daemon, personalizado por sessão:
 
 ```markdown
-# myco view — SN
+<!-- myco protocol v1 -->
+# myco view — FRONT
 
 ## AGORA
-<snapshot de uma linha do estado global relevante pra SN>
+Status: **active** — start login.endpoint
+Nenhum bloqueador conhecido.
 
 ## DIRETIVAS
-<diretivas ativas do DIRECTOR que afetam SN>
+- [2026-04-14T10:23:45] usar-JWT-HS256
+
+## ARTEFATOS PUBLICADOS
+| sessão | artefato | ref | path | spec |
+|---|---|---|---|---|
+| AUTH | auth.v2 | origin/feat/new-auth | /home/user/auth | — |
 
 ## SEUS BLOQUEADORES
-<o que está impedindo SN de avançar agora>
+Nenhum.
 
 ## SEUS DEPENDENTES
-<quem está esperando SN terminar algo>
+- BACK
+
+## BROADCASTS
+- [2026-04-14T10:24:10] **AUTH**: deploy-db-em-1min
+
+## PEERS
+- **BACK**: active, last-seen 4s
+- **AUTH**: idle, last-seen 12s
 
 ## RECURSOS COMPARTILHADOS
-<estado de containers, endpoints, schemas que SN usa>
+| recurso | estado |
+|---|---|
+| container iam-db | UP |
 
-## EVENTOS RELEVANTES (últimos 30s)
-<lista curta, filtrada pra relevância de SN>
+## EVENTOS RELEVANTES (últimos 15)
+...
 
 ## PERGUNTAS PENDENTES
-<perguntas de/pra SN que ainda não foram respondidas>
+Nenhuma.
 
-## DETALHES (opcional, ler com offset/limit)
-<histórico mais longo, só se a sessão precisar investigar>
+## MENSAGENS PENDENTES
+Nenhuma mensagem pendente.
 ```
 
-O topo cabe em 40-60 linhas. Claude lê as primeiras 80 linhas e tem consciência plena. Os detalhes ficam para o caso de investigação específica.
+### View do DIRECTOR
 
-## Escrita atômica de view (daemon)
+A view do DIRECTOR é mais rica e inclui seções extras:
 
-Para evitar que uma sessão leia uma view pela metade enquanto o daemon a reescreve, o daemon usa o padrão temp+rename:
+- **Tabela de sessões**: status, última ação, last-seen, bloqueadores, dependentes
+- **Grafo de dependências**: quem espera quem
+- **Conflitos detectados**: sessões trabalhando no mesmo objeto simultaneamente
 
-```
-1. escreve em view/SN.md.tmp
-2. renomeia view/SN.md.tmp → view/SN.md  (rename() é atômico no Linux)
-```
+### Question TTL
 
-Resultado: leitores nunca veem estado parcial.
+Perguntas expiram após **30 minutos** sem resposta. Isso evita acúmulo de perguntas stale na view.
 
-## Ciclo operacional de uma sessão
+## Regras de visibilidade
 
-Toda sessão Claude segue este ciclo, induzido pelo `CLAUDE.md` compartilhado:
+O daemon filtra eventos por sessão antes de renderizar a view:
 
-1. **Ler** `view/$EU.md` (via `Read` tool, primeiras 80 linhas)
-2. **Decidir** a próxima ação com base na consciência atual
-3. **Executar** a ação (escrever código, subir container, rodar testes, etc)
-4. **Logar** o que fez em `log/$EU.log` (via `Bash` tool, `echo >>`)
-5. Voltar ao passo 1
+| Tipo de evento | Visibilidade |
+|---|---|
+| Próprios eventos | Sempre visível |
+| `direct`, `say` | Todas as sessões |
+| `ask` endereçado a mim | Sempre visível |
+| `reply` | Só sender e target |
+| `note` com `ack:` | Só quem enviou a msg original |
+| `note` de outros | Invisível (spam filter) |
+| Outros eventos | Todas as sessões |
 
-O daemon, em background, escuta `log/*.log` via inotify e reescreve `view/*.md` a cada mudança.
+Filtro atual: **all-see-all** para eventos estruturais (start, done, need, block, up, down). Preparado para filtros mais seletivos em swarms maiores.
 
-## Comunicação entre personas
-
-### Broadcast
-
-Qualquer evento logado é automaticamente visível (filtrado) para as outras personas na próxima leitura de view delas. Não existe "broadcast explícito" — o próprio ato de logar já é broadcast filtrado.
-
-### Mensagem dirigida
-
-Use o verbo `ask`:
+## Ciclo operacional
 
 ```
-2026-04-11T10:23:22 SN ask DIRECTOR deve usar cache
+┌──────────────────────────────────────────────────────────┐
+│ 1. Usuário digita prompt                                  │
+│ 2. Hook UserPromptSubmit injeta view como contexto        │
+│ 3. Claude lê o contexto injetado e decide ação            │
+│ 4. Claude executa (código, testes, etc.)                  │
+│ 5. Claude inclui <myco> block no final da resposta        │
+│ 6. Hook Stop captura o block e envia ao daemon            │
+│ 7. Daemon indexa eventos e re-renderiza views             │
+│ 8. Próximo prompt de qualquer sessão recebe view fresca   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-O daemon roteia isso para `view/DIRECTOR.md` na seção "PERGUNTAS PENDENTES" até que alguém responda com:
+## Versionamento
 
-```
-2026-04-11T10:24:00 DIRECTOR direct SN sim, cache Redis
-```
-
-Respostas viram diretivas e aparecem no topo da view do destinatário.
-
-### Diretiva global
-
-Só a persona `DIRECTOR` pode emitir `direct`. Diretivas aparecem na seção `DIRETIVAS` de **todas** as views, no topo, com prioridade máxima.
-
-## Regras de filtro (v0, manuais)
-
-Ordem de prioridade para montar a view de uma sessão `X`:
-
-1. Diretivas ativas do DIRECTOR (sempre)
-2. Blockers de X (dependências declaradas ainda não satisfeitas)
-3. Dependentes de X (outras sessões esperando X)
-4. Recursos que X usa (containers, endpoints mencionados nos logs de X)
-5. Eventos recentes de sessões com quem X tem dependência bidirecional
-6. Perguntas pendentes envolvendo X
-7. Resto (silenciado por padrão)
-
-## Versionamento do protocolo
-
-Este documento é `protocol v0`. Cada view começa com um comentário HTML:
+Este documento é **protocol v1**. Cada view começa com:
 
 ```html
-<!-- myco protocol v0 -->
+<!-- myco protocol v1 -->
 ```
 
 Sessões podem checar a versão se quiserem adaptar comportamento.
