@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# myco — launch a Claude Code session connected to a myco swarm
+#
+# Usage:
+#   myco <SESSION> [project_dir]
+#
+# Examples:
+#   myco FRONT              # session FRONT in current dir
+#   myco FRONT ~/primoia    # session FRONT in ~/primoia
+#   myco 213 .              # session 213 in current dir
+#
+# Environment (optional, has defaults):
+#   MYCO_URL    — daemon URL (default: http://localhost:8000)
+#   MYCO_TOKEN  — auth token (default: none)
+#
+set -euo pipefail
+
+MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ $# -lt 1 ]; then
+    echo "usage: myco <SESSION> [project_dir]" >&2
+    exit 2
+fi
+
+SESSION="$1"
+PROJECT_DIR="${2:-.}"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# --- Ensure CLAUDE.md exists in project ---
+if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
+    cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
+    echo "[myco] copied CLAUDE.md → $PROJECT_DIR/CLAUDE.md"
+fi
+
+# --- Ensure .claude/settings.json has hooks ---
+SETTINGS_DIR="$PROJECT_DIR/.claude"
+SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+mkdir -p "$SETTINGS_DIR"
+
+if [ ! -f "$SETTINGS_FILE" ]; then
+    cat > "$SETTINGS_FILE" << ENDJSON
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $MYCO_DIR/prototype/myco-hook.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $MYCO_DIR/prototype/myco_prompt_hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+ENDJSON
+    echo "[myco] created hooks → $SETTINGS_FILE"
+fi
+
+# --- Export env vars and launch ---
+export MYCO_SESSION="$SESSION"
+export MYCO_INJECT_VIEW=1
+export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
+# MYCO_TOKEN inherited from environment if set
+
+echo "[myco] session=$SESSION project=$PROJECT_DIR"
+echo "[myco] daemon=$MYCO_URL"
+cd "$PROJECT_DIR"
+exec claude
