@@ -17,7 +17,7 @@ A cada prompt, um hook injeta automaticamente a sua **myco view** como `addition
 | verbo | formato | visibilidade |
 |---|---|---|
 | `start <objeto>` | comecei a trabalhar em X | todos |
-| `done <objeto>` | terminei X | todos |
+| `done <objeto>` | terminei X (use `result:ok\|fail\|partial`) | todos |
 | `need <objeto>` | preciso de X de outra sessão | todos |
 | `block <motivo>` | estou bloqueado | todos |
 | `up <recurso>` | recurso subiu (use `addr:` para endereço) | todos |
@@ -39,6 +39,8 @@ A cada prompt, um hook injeta automaticamente a sua **myco view** como `addition
 | `spec:` | spec ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 | `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
+| `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
+| `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
 
 ## Comunicação entre sessões
 
@@ -52,9 +54,11 @@ ask AUTH preciso-de-ajustes spec:msg/CART-001.md
 ### Responder
 ```
 <myco>
-reply CART resposta spec:msg/AUTH-002.md
+reply CART resposta re:msg/CART-001.md spec:msg/AUTH-002.md
 </myco>
 ```
+
+`re:` liga a resposta à pergunta original — o painel fecha a pergunta automaticamente.
 
 ### Confirmar recebimento de msg/
 ```
@@ -80,6 +84,12 @@ peers/CART/server.py   ← código da sessão CART
 ```
 
 A tabela de ARTEFATOS PUBLICADOS mostra o path absoluto de cada sessão.
+
+## Padrões recomendados
+
+- **Contrato versionado via msg/**: use `msg/SESSAO-NNN.md` como fonte de verdade congelada por versão
+- **Ciclo draft→review→freeze→impl**: uma sessão propõe spec, outra revisa, congelam, implementam em paralelo
+- **Smoke script reusável**: mantenha um script de testes que roda contra cada versão do serviço parceiro
 
 ## Regras
 

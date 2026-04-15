@@ -31,10 +31,17 @@ reply AUTH use bcrypt para hashing, não md5
 </myco>
 ```
 
-Ou com spec detalhada:
+Ou com spec detalhada (use `re:` para ligar à pergunta original):
 ```
 <myco>
-reply AUTH veja spec spec:msg/DIRECTOR-001.md
+reply AUTH veja-spec re:msg/AUTH-005.md spec:msg/DIRECTOR-001.md
+</myco>
+```
+
+Use `re:` em `direct` também para fechar perguntas pendentes:
+```
+<myco>
+direct FRONT atualize-protocolo re:msg/FRONT-010.md spec:msg/DIRECTOR-004.md
 </myco>
 ```
 

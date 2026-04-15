@@ -63,7 +63,7 @@ O que ele faz:
 | Verbo | Significado |
 |---|---|
 | `start` | comecei a trabalhar em X |
-| `done` | terminei X (suporta `ref:` e `spec:`) |
+| `done` | terminei X (suporta `ref:`, `spec:`, `result:`) |
 | `need` | declaro dependência de X |
 | `block` | estou bloqueado |
 | `up` / `down` | recurso subiu/caiu |
@@ -73,7 +73,7 @@ O que ele faz:
 | `direct` | diretiva do DIRECTOR (prioridade máxima) |
 | `log` | observação interna (invisível para outros, alias: `note`) |
 
-**Key:value conventions**: `ref:origin/feat/login`, `spec:msg/AUTH-001.md`, `ack:msg/CART-001.md`, `addr:http://host:port`
+**Key:value conventions**: `ref:origin/feat/login`, `spec:msg/AUTH-001.md`, `ack:msg/CART-001.md`, `addr:http://host:port`, `result:ok|fail|partial`, `re:msg/ID.md`
 
 **Mensagens ricas**: arquivos markdown trocados via HTTP em `msg/`, referenciados com `spec:`.
 

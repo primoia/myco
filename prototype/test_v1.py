@@ -621,12 +621,12 @@ class TestRenderViewWorker:
         idx.apply(parse_event("CART", "T1 CART done cart"))
         # Without session_dirs, path column shows —
         view = render_view(idx, "AUTH")
-        assert "| AUTH | api | origin/main | — | msg/A.md |" in view
-        assert "| CART | cart | — | — | — |" in view
+        assert "| AUTH | api | origin/main | — | — | msg/A.md |" in view
+        assert "| CART | cart | — | — | — | — |" in view
         # With session_dirs, path column shows the dir
         view2 = render_view(idx, "AUTH", session_dirs={"AUTH": "/tmp/a", "CART": "/tmp/b"})
-        assert "| AUTH | api | origin/main | /tmp/a | msg/A.md |" in view2
-        assert "| CART | cart | — | /tmp/b | — |" in view2
+        assert "| AUTH | api | origin/main | — | /tmp/a | msg/A.md |" in view2
+        assert "| CART | cart | — | — | /tmp/b | — |" in view2
 
     def test_no_artifacts_message(self):
         idx = SwarmIndex()
@@ -2357,6 +2357,145 @@ class TestLogVerbBackwardCompat:
         idx.apply(parse_event("CART", "T1 CART note internal-b"))
         assert idx.session_status["AUTH"] == "active"
         assert idx.session_status["CART"] == "active"
+
+
+# ============================================================
+# v1.3: result: on done
+# ============================================================
+
+class TestResultOnDone:
+    def test_done_with_result(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done smoke-v1.2 result:ok ref:smoke.sh"))
+        assert idx.artifacts[0]["result"] == "ok"
+
+    def test_done_without_result(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done api ref:master"))
+        assert idx.artifacts[0]["result"] == ""
+
+    def test_result_in_view(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done smoke result:ok ref:smoke.sh"))
+        view = render_view(idx, "AUTH")
+        assert "| result |" in view
+        assert "| ok |" in view
+
+    def test_result_fail_in_view(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done smoke result:fail"))
+        view = render_view(idx, "AUTH")
+        assert "| fail |" in view
+
+    def test_result_parsed_as_kv(self):
+        text, kvs = parse_detail_kvs("smoke-tests result:ok ref:smoke.sh")
+        assert kvs["result"] == "ok"
+        assert kvs["ref"] == "smoke.sh"
+
+
+# ============================================================
+# v1.3: re: on reply/direct
+# ============================================================
+
+class TestReKey:
+    def test_re_parsed_as_kv(self):
+        text, kvs = parse_detail_kvs("resposta re:msg/FRONT-010.md spec:msg/DIRECTOR-005.md")
+        assert kvs["re"] == "msg/FRONT-010.md"
+        assert kvs["spec"] == "msg/DIRECTOR-005.md"
+
+    def test_reply_with_re_resolves_specific_question(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("FRONT", "T0 FRONT ask DIRECTOR q1 spec:msg/FRONT-010.md"))
+        idx.apply(parse_event("FRONT", "T1 FRONT ask DIRECTOR q2 spec:msg/FRONT-011.md"))
+        # DIRECTOR replies with re: targeting only FRONT-010
+        idx.apply(parse_event("DIRECTOR", "T2 DIRECTOR reply FRONT resposta re:msg/FRONT-010.md"))
+        # FRONT-010 question should be resolved
+        assert "msg/FRONT-010.md" in idx.answered_specs
+        # FRONT-011 should still be pending
+        assert "msg/FRONT-011.md" not in idx.answered_specs
+        # View should show FRONT-011 but not FRONT-010
+        view = render_view(idx, "DIRECTOR")
+        perguntas = view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+        assert "FRONT-010" not in perguntas
+        assert "FRONT-011" in perguntas
+
+    def test_reply_without_re_resolves_all(self):
+        """Without re:, reply resolves all questions from that pair (backward compat)."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("FRONT", "T0 FRONT ask DIRECTOR q1"))
+        idx.apply(parse_event("FRONT", "T1 FRONT ask DIRECTOR q2"))
+        idx.apply(parse_event("DIRECTOR", "T2 DIRECTOR reply FRONT resposta"))
+        view = render_view(idx, "DIRECTOR")
+        perguntas = view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+        assert "Nenhuma." in perguntas
+
+    def test_direct_with_re_resolves_question(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("FRONT", "T0 FRONT ask DIRECTOR ajuda spec:msg/FRONT-010.md"))
+        idx.apply(parse_event("DIRECTOR", "T1 DIRECTOR direct FRONT faca-isso re:msg/FRONT-010.md"))
+        assert "msg/FRONT-010.md" in idx.answered_specs
+        view = render_view(idx, "DIRECTOR")
+        perguntas = view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+        assert "FRONT-010" not in perguntas
+
+
+# ============================================================
+# v1.3: up merge (preserve addr on re-up)
+# ============================================================
+
+class TestUpMerge:
+    def test_up_without_addr_preserves_existing(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        idx.apply(parse_event("AUTH", "T1 AUTH up dev-server"))
+        assert idx.resources["dev-server"]["state"] == "UP"
+        assert idx.resources["dev-server"]["addr"] == "http://192.168.0.214:7777"
+
+    def test_up_with_new_addr_updates(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server addr:http://old:7777"))
+        idx.apply(parse_event("AUTH", "T1 AUTH up dev-server addr:http://new:8888"))
+        assert idx.resources["dev-server"]["addr"] == "http://new:8888"
+
+    def test_up_on_fresh_resource_no_addr(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server"))
+        assert idx.resources["dev-server"]["state"] == "UP"
+        assert idx.resources["dev-server"]["addr"] == ""
+
+
+# ============================================================
+# v1.3: dedupe artifacts by (session, obj)
+# ============================================================
+
+class TestDedupeArtifacts:
+    def test_dedupe_shows_latest(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done api ref:v1.0"))
+        idx.apply(parse_event("AUTH", "T1 AUTH done api ref:v2.0 result:ok"))
+        view = render_view(idx, "AUTH")
+        # Extract artifacts table section only (events section still has both)
+        artifacts_section = view.split("## ARTEFATOS PUBLICADOS")[1].split("##")[0]
+        assert "v2.0" in artifacts_section
+        assert "v1.0" not in artifacts_section
+        # Full list still has both
+        assert len(idx.artifacts) == 2
+
+    def test_dedupe_different_objects_both_shown(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done api ref:v1"))
+        idx.apply(parse_event("AUTH", "T1 AUTH done cli ref:v1"))
+        view = render_view(idx, "AUTH")
+        assert "api" in view
+        assert "cli" in view
+
+    def test_dedupe_different_sessions_both_shown(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done api ref:v1"))
+        idx.apply(parse_event("CART", "T1 CART done api ref:v1"))
+        view = render_view(idx, "AUTH")
+        assert "AUTH" in view
+        assert "CART" in view
 
 
 if __name__ == "__main__":

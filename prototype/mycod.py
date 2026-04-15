@@ -48,7 +48,7 @@ def _sanitize_msg(content: str) -> str:
 
 # ---------- Event parsing ----------
 
-_KNOWN_KV_KEYS = {"ref", "spec", "ack", "addr"}
+_KNOWN_KV_KEYS = {"ref", "spec", "ack", "addr", "result", "re"}
 _KV_RE = re.compile(r'\b([a-z]+):(\S+)')
 
 
@@ -162,6 +162,7 @@ class SwarmIndex:
                 "obj": obj,
                 "ref": kvs.get("ref", ""),
                 "spec": kvs.get("spec", ""),
+                "result": kvs.get("result", ""),
             })
         elif verb == "need":
             self.needs[s].add(obj)
@@ -169,13 +170,22 @@ class SwarmIndex:
             self.session_status[s] = "blocked"
             self.session_action[s] = f"blocked: {obj} {detail_text}".strip()
         elif verb == "up":
-            self.resources[full_obj] = {"state": "UP", "addr": kvs.get("addr", "")}
+            new_addr = kvs.get("addr", "")
+            if not new_addr:
+                # Preserve existing addr on re-up without addr:
+                existing = self.resources.get(full_obj, {})
+                new_addr = existing.get("addr", "") if isinstance(existing, dict) else ""
+            self.resources[full_obj] = {"state": "UP", "addr": new_addr}
         elif verb == "down":
             existing = self.resources.get(full_obj, {})
             prev_addr = existing.get("addr", "") if isinstance(existing, dict) else ""
             self.resources[full_obj] = {"state": "DOWN", "addr": prev_addr}
         elif verb == "direct":
             self.directives.append((ev["ts"], obj, detail))
+            # v1.3: re: on direct resolves a specific question
+            re_id = kvs.get("re")
+            if re_id:
+                self._resolve_question_by_spec(re_id, s)
         elif verb == "ask":
             # Ignore self-ask (target == sender) — pollutes pending questions
             if obj == s:
@@ -200,8 +210,13 @@ class SwarmIndex:
                 self.msg_targets[spec_id] = obj  # obj = target session
             # Track reply for reply-read indicator
             self.replies.append((ev["ts"], s, obj, spec_id or ""))
-            # Resolve all open questions from target→self
-            self._resolve_questions_between(obj, s)
+            # v1.3: re: resolves a specific question by its spec ID
+            re_id = kvs.get("re")
+            if re_id:
+                self._resolve_question_by_spec(re_id, s)
+            else:
+                # Fallback: resolve all open questions from target→self
+                self._resolve_questions_between(obj, s)
             if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
                 self.session_action[s] = f"reply {obj}"
@@ -235,6 +250,17 @@ class SwarmIndex:
                 if spec_id:
                     self.msg_acks[spec_id].add(replier)
                     self.answered_specs.add(spec_id)
+
+    def _resolve_question_by_spec(self, spec_id: str, replier: str):
+        """Resolve a specific question identified by its spec: ID.
+        Also acks the spec message."""
+        for ts, frm, to, detail in self.questions:
+            _, q_kvs = parse_detail_kvs(detail)
+            if q_kvs.get("spec") == spec_id:
+                self.resolved_questions.add((frm, to, ts))
+                self.msg_acks[spec_id].add(replier)
+                self.answered_specs.add(spec_id)
+                return  # resolve first match only
 
     def satisfied(self, artifact: str) -> bool:
         for provided in self.provides.values():
@@ -453,17 +479,23 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
         lines.append("Nenhuma diretiva ativa.")
     lines.append("")
 
-    # v1: ARTEFATOS PUBLICADOS (permanent, never capped)
+    # v1.3: ARTEFATOS PUBLICADOS — dedupe by (session, obj), show latest only
     lines.append("## ARTEFATOS PUBLICADOS")
     if index.artifacts:
-        lines.append("| sessão | artefato | ref | path | spec |")
-        lines.append("|---|---|---|---|---|")
+        # Dedupe: keep last artifact per (session, obj)
+        seen = {}
         for a in index.artifacts:
+            seen[(a["session"], a["obj"])] = a
+        deduped = list(seen.values())
+        lines.append("| sessão | artefato | ref | result | path | spec |")
+        lines.append("|---|---|---|---|---|---|")
+        for a in deduped:
             s_dir = (session_dirs or {}).get(a["session"], "")
             ref = a["ref"] or "—"
+            result = a.get("result", "") or "—"
             spec = a["spec"] or "—"
             path = s_dir or "—"
-            lines.append(f"| {a['session']} | {a['obj']} | {ref} | {path} | {spec} |")
+            lines.append(f"| {a['session']} | {a['obj']} | {ref} | {result} | {path} | {spec} |")
     else:
         lines.append("Nenhum artefato publicado.")
     lines.append("")

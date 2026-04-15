@@ -23,7 +23,7 @@ Um serviço externo captura esse bloco e distribui para as outras sessões. **N�
 ## Verbos
 
 - `start <objeto>` — comecei a trabalhar em X
-- `done <objeto>` — terminei X (use `ref:` e `spec:` para detalhes)
+- `done <objeto>` — terminei X (use `ref:`, `spec:`, `result:ok|fail|partial`)
 - `need <objeto>` — preciso de X (de outra sessão)
 - `block <motivo>` — estou bloqueado
 - `up <recurso>` — recurso subiu (use `addr:` para endereço: `up dev-server addr:http://192.168.0.214:7777`)
@@ -54,9 +54,11 @@ ask AUTH preciso-de-ajustes spec:msg/CART-001.md
 ### Responder (IMPORTANTE: use reply, não log)
 ```
 <myco>
-reply CART resposta-sobre-ajustes spec:msg/AUTH-002.md
+reply CART resposta-sobre-ajustes re:msg/CART-001.md spec:msg/AUTH-002.md
 </myco>
 ```
+
+`re:` liga a resposta à pergunta original — o painel fecha a pergunta automaticamente.
 
 `reply` é visível ao destinatário e limpa a pergunta de PERGUNTAS PENDENTES. `log` é invisível para outras sessões — só serve para registros internos.
 
@@ -77,6 +79,8 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 | `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
+| `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
+| `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
 
 ## Comunicação rica via msg/
 
@@ -103,6 +107,12 @@ Read peers/AUTH/index.js
 ```
 
 A tabela de ARTEFATOS PUBLICADOS mostra o path de cada sessão para referência.
+
+## Padrões recomendados
+
+- **Contrato versionado via msg/**: use `msg/SESSAO-NNN.md` como fonte de verdade congelada por versão (ex: BACK-010 = v1 da API, BACK-014 = v1.1)
+- **Ciclo draft→review→freeze→impl**: uma sessão propõe spec, outra revisa, congelam, implementam em paralelo
+- **Smoke script reusável**: mantenha um script de testes que roda contra cada versão do serviço parceiro
 
 ## Regras
 

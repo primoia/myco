@@ -52,13 +52,13 @@ Exemplos:
 | Verbo | Significado | Exemplo |
 |---|---|---|
 | `start` | comecei a trabalhar em X | `start login.endpoint` |
-| `done` | terminei X, efeito publicado | `done auth.v2 ref:origin/feat/new-auth` |
+| `done` | terminei X, efeito publicado | `done auth.v2 result:ok ref:origin/feat/new-auth` |
 | `need` | declaro dependência (precondição) | `need AUTH.auth.v2` |
 | `block` | estou bloqueado | `block esperando-deploy-do-db` |
 | `up` | recurso subiu (suporta `addr:`) | `up dev-server addr:http://192.168.0.214:7777` |
 | `down` | recurso caiu | `down endpoint /api/auth` |
 | `ask` | pergunta dirigida a outra sessão | `ask DIRECTOR preciso-de-specs` |
-| `reply` | resposta a uma pergunta | `reply BACK resposta spec:msg/AUTH-002.md` |
+| `reply` | resposta a uma pergunta | `reply BACK resposta re:msg/BACK-005.md spec:msg/AUTH-002.md` |
 | `say` | broadcast visível para TODAS as sessões | `say deploy-em-1min` |
 | `direct` | diretiva (só DIRECTOR usa) | `direct all usar-JWT-HS256` |
 | `log` | observação interna (invisível para outros) | `log ack ack:msg/CART-001.md` |
@@ -68,7 +68,7 @@ Exemplos:
 ### Semântica especial
 
 - **`ask`**: self-ask é rejeitado (target == sender → ignorado pelo daemon)
-- **`reply`**: resolve perguntas pendentes do target→sender e faz auto-ack de specs associados
+- **`reply`**: resolve perguntas pendentes do target→sender. Com `re:`, resolve apenas a pergunta específica. Sem `re:`, resolve todas as pendentes do par.
 - **`say`**: aparece na seção BROADCASTS de todas as views
 - **`log`** (alias: `note`): NUNCA visível para outras sessões — só serve para registros internos e acks
 - **`direct`**: aparece no topo de todas as views com prioridade máxima
@@ -83,11 +83,14 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 | `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
+| `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
+| `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
 
 Exemplo completo:
 
 ```
-done auth-api-v2 ref:origin/feat/new-login spec:msg/AUTH-003.md
+done auth-api-v2 result:ok ref:origin/feat/new-login spec:msg/AUTH-003.md
+reply FRONT resposta re:msg/FRONT-010.md spec:msg/DIRECTOR-005.md
 ```
 
 ## Convenções de slug
@@ -178,9 +181,9 @@ Nenhum bloqueador conhecido.
 - [2026-04-14T10:23:45] usar-JWT-HS256
 
 ## ARTEFATOS PUBLICADOS
-| sessão | artefato | ref | path | spec |
-|---|---|---|---|---|
-| AUTH | auth.v2 | origin/feat/new-auth | /home/user/auth | — |
+| sessão | artefato | ref | result | path | spec |
+|---|---|---|---|---|---|
+| AUTH | auth.v2 | origin/feat/new-auth | ok | /home/user/auth | — |
 
 ## SEUS BLOQUEADORES
 Nenhum.
@@ -252,6 +255,19 @@ Filtro atual: **all-see-all** para eventos estruturais (start, done, need, block
 │ 8. Próximo prompt de qualquer sessão recebe view fresca   │
 └──────────────────────────────────────────────────────────┘
 ```
+
+## Padrões recomendados
+
+Padrões que emergiram em uso real e são recomendados:
+
+### Contrato versionado via msg/
+Use `msg/SESSAO-NNN.md` como fonte de verdade congelada por versão. Exemplo: `BACK-010.md` = v1 da API, `BACK-014.md` = v1.1. Cada mensagem é imutável — funciona como snapshot de contrato.
+
+### Ciclo draft→review→freeze→impl
+Uma sessão propõe spec (draft), outra revisa e ajusta (review), congelam a versão final (freeze), implementam em paralelo (impl). Fluxo natural para negociação de contratos HTTP/API.
+
+### Smoke script como artefato reusável
+Sessão consumidora mantém um script de testes (`smoke.sh`) que roda contra cada versão do serviço parceiro. Custo baixo, valor alto para regressão.
 
 ## Versionamento
 
