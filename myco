@@ -27,11 +27,8 @@ SESSION="$1"
 PROJECT_DIR="${2:-.}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
-# --- Ensure CLAUDE.md exists in project ---
-if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
-    cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
-    echo "[myco] copied CLAUDE.md → $PROJECT_DIR/CLAUDE.md"
-fi
+# --- Always sync CLAUDE.md from myco repo ---
+cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
 
 # --- Ensure .claude/settings.json has hooks ---
 SETTINGS_DIR="$PROJECT_DIR/.claude"
