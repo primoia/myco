@@ -1622,6 +1622,241 @@ class TestRenderAllViewCache:
         assert "<!-- myco protocol v1 -->" in d.view_cache["AUTH"]
 
 
+# ============================================================
+# Hybrid mode: HTTP + filesystem polling coexist
+# ============================================================
+
+class TestHybridMode:
+    """Test that HTTP ingest and filesystem polling don't double-process events."""
+
+    def test_ingest_advances_offset(self, tmp_path):
+        """ingest_events should advance the file offset so scan_once skips those bytes."""
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.ingest_events("AUTH", ["start login"])
+        # scan_once should see nothing new (offset already advanced)
+        changed = d.scan_once()
+        assert changed is False
+        # But the event was processed
+        assert d.index.session_status["AUTH"] == "active"
+
+    def test_filesystem_event_seen_in_http_mode(self, tmp_path):
+        """Events written directly to log files are picked up by scan_once."""
+        from mycod import Daemon
+        log_dir = tmp_path / "log"
+        log_dir.mkdir(parents=True)
+        d = Daemon(tmp_path)
+        # Simulate a hook fallback: direct filesystem append
+        (log_dir / "CART.log").write_text("2025-01-01T00:00:00 CART start checkout\n")
+        changed = d.scan_once()
+        assert changed is True
+        assert d.index.session_status["CART"] == "active"
+
+    def test_mixed_http_and_filesystem(self, tmp_path):
+        """HTTP events and filesystem events coexist without duplication."""
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        log_dir = tmp_path / "log"
+        # HTTP event
+        d.ingest_events("AUTH", ["start login"])
+        # Filesystem event (different session)
+        (log_dir / "CART.log").write_text("2025-01-01T00:00:00 CART start checkout\n")
+        d.scan_once()
+        assert d.index.session_status["AUTH"] == "active"
+        assert d.index.session_status["CART"] == "active"
+        # Total events: exactly 2 (no duplication)
+        assert len(list(d.index.events)) == 2
+
+
+# ============================================================
+# Token auth
+# ============================================================
+
+class TestTokenAuth:
+    """Test MYCO_TOKEN authentication on HTTP endpoints."""
+
+    @staticmethod
+    def _start_server_with_token(tmp_path, token=""):
+        import os
+        from mycod import Daemon, MycoHTTPServer, MycoHandler
+        old_token = os.environ.get("MYCO_TOKEN", "")
+        if token:
+            os.environ["MYCO_TOKEN"] = token
+        elif "MYCO_TOKEN" in os.environ:
+            del os.environ["MYCO_TOKEN"]
+        d = Daemon(tmp_path)
+        d.index.sessions_known.add("DIRECTOR")
+        d._render_to_cache()
+        server = MycoHTTPServer(("127.0.0.1", 0), MycoHandler, d)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        return server, port, d, old_token
+
+    def test_no_token_allows_all(self, tmp_path):
+        """Without MYCO_TOKEN, all requests pass."""
+        import urllib.request, json, os
+        server, port, d, old = self._start_server_with_token(tmp_path, token="")
+        try:
+            d.ingest_events("AUTH", ["start login"])
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/view/AUTH")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                assert resp.status == 200
+        finally:
+            server.shutdown()
+            if old:
+                os.environ["MYCO_TOKEN"] = old
+
+    def test_valid_token_passes(self, tmp_path):
+        """Correct Bearer token grants access."""
+        import urllib.request, json, os
+        server, port, d, old = self._start_server_with_token(tmp_path, token="secret123")
+        try:
+            d.ingest_events("AUTH", ["start login"])
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/view/AUTH",
+                headers={"Authorization": "Bearer secret123"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                assert resp.status == 200
+        finally:
+            server.shutdown()
+            if old:
+                os.environ["MYCO_TOKEN"] = old
+            elif "MYCO_TOKEN" in os.environ:
+                del os.environ["MYCO_TOKEN"]
+
+    def test_wrong_token_rejected(self, tmp_path):
+        """Wrong Bearer token returns 401."""
+        import urllib.request, urllib.error, os
+        server, port, d, old = self._start_server_with_token(tmp_path, token="secret123")
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/view/AUTH",
+                headers={"Authorization": "Bearer wrong"},
+            )
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 401"
+            except urllib.error.HTTPError as e:
+                assert e.code == 401
+        finally:
+            server.shutdown()
+            if old:
+                os.environ["MYCO_TOKEN"] = old
+            elif "MYCO_TOKEN" in os.environ:
+                del os.environ["MYCO_TOKEN"]
+
+    def test_missing_token_rejected(self, tmp_path):
+        """No Authorization header returns 401 when token is configured."""
+        import urllib.request, urllib.error, os
+        server, port, d, old = self._start_server_with_token(tmp_path, token="secret123")
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/status")
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 401"
+            except urllib.error.HTTPError as e:
+                assert e.code == 401
+        finally:
+            server.shutdown()
+            if old:
+                os.environ["MYCO_TOKEN"] = old
+            elif "MYCO_TOKEN" in os.environ:
+                del os.environ["MYCO_TOKEN"]
+
+    def test_healthz_no_auth_needed(self, tmp_path):
+        """/healthz works without token even when auth is configured."""
+        import urllib.request, json, os
+        server, port, d, old = self._start_server_with_token(tmp_path, token="secret123")
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/healthz")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read())
+                assert resp.status == 200
+                assert body["ok"] is True
+                assert "uptime_s" in body
+                assert "sessions" in body
+        finally:
+            server.shutdown()
+            if old:
+                os.environ["MYCO_TOKEN"] = old
+            elif "MYCO_TOKEN" in os.environ:
+                del os.environ["MYCO_TOKEN"]
+
+    def test_post_events_requires_token(self, tmp_path):
+        """POST /events rejected without valid token."""
+        import urllib.request, urllib.error, json, os
+        server, port, d, old = self._start_server_with_token(tmp_path, token="secret123")
+        try:
+            data = json.dumps({"session": "AUTH", "events": ["start login"]}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/events",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 401"
+            except urllib.error.HTTPError as e:
+                assert e.code == 401
+        finally:
+            server.shutdown()
+            if old:
+                os.environ["MYCO_TOKEN"] = old
+            elif "MYCO_TOKEN" in os.environ:
+                del os.environ["MYCO_TOKEN"]
+
+
+# ============================================================
+# /healthz endpoint
+# ============================================================
+
+class TestHealthz:
+    """Test /healthz endpoint."""
+
+    @staticmethod
+    def _start_server(tmp_path):
+        from mycod import Daemon, MycoHTTPServer, MycoHandler
+        d = Daemon(tmp_path)
+        d.index.sessions_known.add("DIRECTOR")
+        d._render_to_cache()
+        server = MycoHTTPServer(("127.0.0.1", 0), MycoHandler, d)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        return server, port, d
+
+    def test_healthz_returns_ok(self, tmp_path):
+        import urllib.request, json
+        server, port, d = self._start_server(tmp_path)
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/healthz")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read())
+                assert resp.status == 200
+                assert body["ok"] is True
+                assert body["uptime_s"] >= 0
+                assert body["sessions"] >= 1  # DIRECTOR always present
+        finally:
+            server.shutdown()
+
+    def test_healthz_session_count_updates(self, tmp_path):
+        import urllib.request, json
+        server, port, d = self._start_server(tmp_path)
+        try:
+            d.ingest_events("AUTH", ["start login"])
+            d.ingest_events("CART", ["start checkout"])
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/healthz")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read())
+                assert body["sessions"] >= 3  # DIRECTOR + AUTH + CART
+        finally:
+            server.shutdown()
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

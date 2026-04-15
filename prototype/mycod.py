@@ -550,6 +550,7 @@ class Daemon:
         self.session_dirs = self._load_session_dirs()
         self.lock = threading.Lock()
         self.view_cache = {}
+        self.start_time = time.time()
 
     def _load_session_dirs(self) -> dict:
         """Load session→project_dir mapping from .myco-state.json."""
@@ -584,7 +585,8 @@ class Daemon:
 
     def ingest_events(self, session: str, event_lines: list):
         """Thread-safe ingestion of events from HTTP POST.
-        Persists to log file and updates index + view cache."""
+        Persists to log file and updates index + view cache.
+        Advances the file offset so scan_once won't re-process these lines."""
         with self.lock:
             ts = time.strftime("%Y-%m-%dT%H:%M:%S")
             log_file = self.log_dir / f"{session}.log"
@@ -593,6 +595,12 @@ class Daemon:
                     full_line = f"{ts} {session} {ev_line}"
                     f.write(full_line + "\n")
                     self.process_line(session, full_line)
+                # Advance offset so poll loop skips what we just wrote
+                new_size = f.tell()
+            if session not in self.offsets:
+                self.offsets[session] = 0
+                self.buffers[session] = ""
+            self.offsets[session] = new_size
             self._render_to_cache()
 
     def process_line(self, session: str, line: str) -> bool:
@@ -662,6 +670,35 @@ class Daemon:
         else:
             self._run_poll()
 
+    def _run_http(self, port: int):
+        server = MycoHTTPServer(("", port), MycoHandler, self)
+        print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
+        print(f"[mycod] swarm dir: {self.swarm_dir}", file=sys.stderr)
+        # Run HTTP server in a background thread so we can poll logs too
+        http_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        http_thread.start()
+        print(f"[mycod] polling {self.log_dir} (hybrid mode: HTTP + filesystem)", file=sys.stderr)
+        try:
+            while True:
+                changed = False
+                with self.lock:
+                    changed = self.scan_once()
+                    if changed:
+                        self._render_to_cache()
+                        # Also write to filesystem for local readers
+                        sessions = set(self.index.sessions_known) | {"DIRECTOR"}
+                        for s in sessions:
+                            content = self.view_cache.get(s, "")
+                            if content:
+                                write_view_atomic(self.view_dir / f"{s}.md", content)
+                        if self.verbose:
+                            now = time.strftime("%H:%M:%S")
+                            slist = sorted(self.index.sessions_known)
+                            print(f"[mycod {now}] rendered {len(slist)} views ({', '.join(slist)})", file=sys.stderr)
+                time.sleep(self.POLL_INTERVAL_SEC)
+        except KeyboardInterrupt:
+            server.shutdown()
+
     def _run_poll(self):
         print(f"[mycod] watching {self.log_dir}", file=sys.stderr)
         print(f"[mycod] writing to {self.view_dir}", file=sys.stderr)
@@ -679,14 +716,6 @@ class Daemon:
         except KeyboardInterrupt:
             pass
 
-    def _run_http(self, port: int):
-        server = MycoHTTPServer(("", port), MycoHandler, self)
-        print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
-        print(f"[mycod] swarm dir: {self.swarm_dir}", file=sys.stderr)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            server.shutdown()
 
 
 # ---------- HTTP server ----------
@@ -696,13 +725,39 @@ class MycoHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, server_address, handler_class, daemon: Daemon):
         self.daemon_ref = daemon  # avoid shadowing socketserver.BaseServer.daemon
+        self.auth_token = os.environ.get("MYCO_TOKEN", "")
         super().__init__(server_address, handler_class)
 
 
 class MycoHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the myco daemon."""
 
+    def _check_auth(self) -> bool:
+        """Validate Bearer token if MYCO_TOKEN is configured. Returns True if ok."""
+        token = self.server.auth_token
+        if not token:
+            return True  # no auth configured
+        auth = self.headers.get("Authorization", "")
+        if auth == f"Bearer {token}":
+            return True
+        self._respond(401, json.dumps({"ok": False, "error": "unauthorized"}),
+                      content_type="application/json")
+        return False
+
     def do_GET(self):
+        if self.path == "/healthz":
+            # Health check — no auth required
+            daemon = self.server.daemon_ref
+            uptime = time.time() - daemon.start_time
+            body = json.dumps({
+                "ok": True,
+                "uptime_s": round(uptime, 1),
+                "sessions": len(daemon.index.sessions_known),
+            })
+            self._respond(200, body, content_type="application/json")
+            return
+        if not self._check_auth():
+            return
         if self.path.startswith("/view/"):
             session = self.path[6:].strip("/").upper()
             daemon = self.server.daemon_ref
@@ -718,6 +773,8 @@ class MycoHandler(BaseHTTPRequestHandler):
             self._respond(404, "not found")
 
     def do_POST(self):
+        if not self._check_auth():
+            return
         if self.path == "/events":
             body = self._read_body()
             try:

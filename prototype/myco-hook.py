@@ -176,23 +176,37 @@ def append_events_fs(session: str, events: list) -> None:
     debug(f"appended {len(events)} event(s) to {log_file}")
 
 
+def _make_headers() -> dict:
+    """Build HTTP headers, including auth token if configured."""
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("MYCO_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def post_events_http(session: str, events: list) -> bool:
-    """POST events to the daemon via HTTP. Returns True on success."""
+    """POST events to the daemon via HTTP. Retries once before giving up."""
     url = os.environ.get("MYCO_URL")
     if not url:
         return False
-    try:
-        data = json.dumps({"session": session, "events": events}).encode()
-        req = urllib.request.Request(
-            f"{url}/events",
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            return resp.status == 200
-    except Exception as e:
-        debug(f"HTTP POST failed ({e}), falling back to filesystem")
-        return False
+    data = json.dumps({"session": session, "events": events}).encode()
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(
+                f"{url}/events",
+                data=data,
+                headers=_make_headers(),
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                return resp.status == 200
+        except Exception as e:
+            if attempt == 0:
+                debug(f"HTTP POST attempt 1 failed ({e}), retrying in 100ms")
+                time.sleep(0.1)
+            else:
+                debug(f"HTTP POST attempt 2 failed ({e}), falling back to filesystem")
+    return False
 
 
 def main() -> int:

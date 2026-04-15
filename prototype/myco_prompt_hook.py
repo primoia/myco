@@ -80,18 +80,36 @@ def swarm_dir() -> Path:
     return Path(os.environ.get("MYCO_SWARM", "/mnt/ramdisk/myco"))
 
 
+def _make_headers() -> dict:
+    """Build HTTP headers, including auth token if configured."""
+    headers = {}
+    token = os.environ.get("MYCO_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def fetch_view_http(session: str) -> str:
-    """GET the view from the daemon via HTTP. Returns "" on failure."""
+    """GET the view from the daemon via HTTP. Retries once before giving up."""
     url = os.environ.get("MYCO_URL")
     if not url:
         return ""
-    try:
-        req = urllib.request.Request(f"{url}/view/{session}")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            if resp.status == 200:
-                return resp.read().decode("utf-8")
-    except Exception as e:
-        debug(f"HTTP GET view failed ({e}), falling back to filesystem")
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(
+                f"{url}/view/{session}",
+                headers=_make_headers(),
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status == 200:
+                    return resp.read().decode("utf-8")
+        except Exception as e:
+            if attempt == 0:
+                debug(f"HTTP GET attempt 1 failed ({e}), retrying in 100ms")
+                import time
+                time.sleep(0.1)
+            else:
+                debug(f"HTTP GET attempt 2 failed ({e}), falling back to filesystem")
     return ""
 
 
