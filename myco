@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# myco — launch a Claude Code session connected to a myco swarm
+#
+# Usage:
+#   myco <SESSION> [project_dir] [-- claude_flags...]
+#
+# Examples:
+#   myco FRONT                        # session FRONT in current dir
+#   myco FRONT ~/primoia              # session FRONT in ~/primoia
+#   myco FRONT ~/primoia --resume     # resume last session
+#   myco FRONT . -- --model sonnet    # pass flags to claude
+#
+# Environment (optional, has defaults):
+#   MYCO_URL    — daemon URL (default: http://localhost:8000)
+#   MYCO_TOKEN  — auth token (default: none)
+#
+set -euo pipefail
+
+MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ $# -lt 1 ]; then
+    echo "usage: myco <SESSION> [project_dir] [--resume] [-- claude_flags...]" >&2
+    exit 2
+fi
+
+SESSION="$1"
+shift
+
+# Parse optional project_dir and flags
+PROJECT_DIR="."
+CLAUDE_ARGS=()
+RESUME=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --resume)
+            RESUME=true
+            shift
+            ;;
+        --)
+            shift
+            CLAUDE_ARGS+=("$@")
+            break
+            ;;
+        *)
+            # First non-flag arg is project_dir
+            if [ "$PROJECT_DIR" = "." ] && [ -d "$1" ]; then
+                PROJECT_DIR="$1"
+            else
+                CLAUDE_ARGS+=("$1")
+            fi
+            shift
+            ;;
+    esac
+done
+
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# --- Always sync CLAUDE.md from myco repo ---
+cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
+
+# --- Ensure .claude/settings.json has hooks ---
+SETTINGS_DIR="$PROJECT_DIR/.claude"
+SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+mkdir -p "$SETTINGS_DIR"
+
+if [ ! -f "$SETTINGS_FILE" ]; then
+    cat > "$SETTINGS_FILE" << ENDJSON
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $MYCO_DIR/prototype/myco-hook.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $MYCO_DIR/prototype/myco_prompt_hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+ENDJSON
+    echo "[myco] created hooks → $SETTINGS_FILE"
+fi
+
+# --- Export env vars and launch ---
+export MYCO_SESSION="$SESSION"
+export MYCO_INJECT_VIEW=1
+export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
+# MYCO_TOKEN inherited from environment if set
+
+echo "[myco] session=$SESSION project=$PROJECT_DIR"
+echo "[myco] daemon=$MYCO_URL"
+
+if [ "$RESUME" = true ]; then
+    CLAUDE_ARGS=("--resume" "${CLAUDE_ARGS[@]}")
+    echo "[myco] resuming previous session"
+fi
+
+cd "$PROJECT_DIR"
+exec claude "${CLAUDE_ARGS[@]}"

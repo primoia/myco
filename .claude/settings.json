@@ -9,6 +9,16 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/prototype/myco_prompt_hook.py"
+          }
+        ]
+      }
     ]
   }
 }

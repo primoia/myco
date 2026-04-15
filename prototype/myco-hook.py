@@ -40,13 +40,14 @@ import os
 import re
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 TAG_RE = re.compile(r"<myco>(.*?)</myco>", re.DOTALL | re.IGNORECASE)
 
 VALID_VERBS = {
     "start", "done", "need", "block",
-    "up", "down", "direct", "ask", "note",
+    "up", "down", "direct", "ask", "note", "reply", "say",
 }
 
 
@@ -164,7 +165,7 @@ def swarm_dir() -> Path:
     return Path(os.environ.get("MYCO_SWARM", "/mnt/ramdisk/myco"))
 
 
-def append_events(session: str, events: list) -> None:
+def append_events_fs(session: str, events: list) -> None:
     log_dir = swarm_dir() / "log"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"{session}.log"
@@ -173,6 +174,39 @@ def append_events(session: str, events: list) -> None:
         for ev in events:
             f.write(f"{ts} {session} {ev}\n")
     debug(f"appended {len(events)} event(s) to {log_file}")
+
+
+def _make_headers() -> dict:
+    """Build HTTP headers, including auth token if configured."""
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("MYCO_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def post_events_http(session: str, events: list) -> bool:
+    """POST events to the daemon via HTTP. Retries once before giving up."""
+    url = os.environ.get("MYCO_URL")
+    if not url:
+        return False
+    data = json.dumps({"session": session, "events": events}).encode()
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(
+                f"{url}/events",
+                data=data,
+                headers=_make_headers(),
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                return resp.status == 200
+        except Exception as e:
+            if attempt == 0:
+                debug(f"HTTP POST attempt 1 failed ({e}), retrying in 100ms")
+                time.sleep(0.1)
+            else:
+                debug(f"HTTP POST attempt 2 failed ({e}), falling back to filesystem")
+    return False
 
 
 def main() -> int:
@@ -203,7 +237,8 @@ def main() -> int:
         return 0
 
     session = session_name(payload)
-    append_events(session, events)
+    if not post_events_http(session, events):
+        append_events_fs(session, events)
     return 0
 
 
