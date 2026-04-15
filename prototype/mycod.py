@@ -31,6 +31,21 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 
+# ---------- Message sanitization ----------
+
+_DANGEROUS_TAGS_RE = re.compile(
+    r'<(/?)(system-reminder|command-\w+|tool_call|function_calls|antml:)',
+    re.IGNORECASE,
+)
+
+MSG_MAX_BYTES = 65536  # 64KB
+
+
+def _sanitize_msg(content: str) -> str:
+    """Escape tags that could be interpreted as system instructions."""
+    return _DANGEROUS_TAGS_RE.sub(r'&lt;\1\2', content)
+
+
 # ---------- Event parsing ----------
 
 _KNOWN_KV_KEYS = {"ref", "spec", "ack"}
@@ -836,7 +851,10 @@ class MycoHandler(BaseHTTPRequestHandler):
             if not msg_file.exists():
                 self._respond(404, "not found")
                 return
-            content = msg_file.read_text(errors="replace")
+            raw_content = msg_file.read_text(errors="replace")
+            # S1 fix: sanitize dangerous tags that could be interpreted as
+            # system instructions by Claude when injected into context
+            content = _sanitize_msg(raw_content)
             # Auto-ack: if ?session=X is provided, mark msg as read by that session
             qs = parse_qs(parsed.query)
             reader = qs.get("session", [None])[0]
@@ -883,9 +901,20 @@ class MycoHandler(BaseHTTPRequestHandler):
                               content_type="application/json")
                 return
             body = self._read_body()
+            # S3 fix: reject oversized payloads
+            if len(body.encode("utf-8")) > MSG_MAX_BYTES:
+                self._respond(413, json.dumps({"ok": False, "error": f"payload exceeds {MSG_MAX_BYTES} bytes"}),
+                              content_type="application/json")
+                return
             msg_dir = self.server.daemon_ref.swarm_dir / "msg"
             msg_dir.mkdir(parents=True, exist_ok=True)
-            (msg_dir / filename).write_text(body)
+            msg_file = msg_dir / filename
+            # S2 fix: reject overwrite of existing msg
+            if msg_file.exists():
+                self._respond(409, json.dumps({"ok": False, "error": "msg already exists"}),
+                              content_type="application/json")
+                return
+            msg_file.write_text(body)
             self._respond(200, json.dumps({"ok": True}),
                           content_type="application/json")
         elif self.path.startswith("/dispatch/"):
