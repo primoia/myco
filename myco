@@ -3,12 +3,13 @@
 # myco — launch a Claude Code session connected to a myco swarm
 #
 # Usage:
-#   myco <SESSION> [project_dir]
+#   myco <SESSION> [project_dir] [-- claude_flags...]
 #
 # Examples:
-#   myco FRONT              # session FRONT in current dir
-#   myco FRONT ~/primoia    # session FRONT in ~/primoia
-#   myco 213 .              # session 213 in current dir
+#   myco FRONT                        # session FRONT in current dir
+#   myco FRONT ~/primoia              # session FRONT in ~/primoia
+#   myco FRONT ~/primoia --resume     # resume last session
+#   myco FRONT . -- --model sonnet    # pass flags to claude
 #
 # Environment (optional, has defaults):
 #   MYCO_URL    — daemon URL (default: http://localhost:8000)
@@ -19,12 +20,41 @@ set -euo pipefail
 MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ $# -lt 1 ]; then
-    echo "usage: myco <SESSION> [project_dir]" >&2
+    echo "usage: myco <SESSION> [project_dir] [--resume] [-- claude_flags...]" >&2
     exit 2
 fi
 
 SESSION="$1"
-PROJECT_DIR="${2:-.}"
+shift
+
+# Parse optional project_dir and flags
+PROJECT_DIR="."
+CLAUDE_ARGS=()
+RESUME=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --resume)
+            RESUME=true
+            shift
+            ;;
+        --)
+            shift
+            CLAUDE_ARGS+=("$@")
+            break
+            ;;
+        *)
+            # First non-flag arg is project_dir
+            if [ "$PROJECT_DIR" = "." ] && [ -d "$1" ]; then
+                PROJECT_DIR="$1"
+            else
+                CLAUDE_ARGS+=("$1")
+            fi
+            shift
+            ;;
+    esac
+done
+
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
 # --- Always sync CLAUDE.md from myco repo ---
@@ -73,5 +103,11 @@ export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
 
 echo "[myco] session=$SESSION project=$PROJECT_DIR"
 echo "[myco] daemon=$MYCO_URL"
+
+if [ "$RESUME" = true ]; then
+    CLAUDE_ARGS=("--resume" "${CLAUDE_ARGS[@]}")
+    echo "[myco] resuming previous session"
+fi
+
 cd "$PROJECT_DIR"
-exec claude
+exec claude "${CLAUDE_ARGS[@]}"
