@@ -48,7 +48,7 @@ def _sanitize_msg(content: str) -> str:
 
 # ---------- Event parsing ----------
 
-_KNOWN_KV_KEYS = {"ref", "spec", "ack"}
+_KNOWN_KV_KEYS = {"ref", "spec", "ack", "addr"}
 _KV_RE = re.compile(r'\b([a-z]+):(\S+)')
 
 
@@ -128,6 +128,7 @@ class SwarmIndex:
         self.resolved_questions = set()    # (frm, to, ts) tuples resolved by reply
         self.last_seen = {}                  # session → timestamp string
         self.broadcasts = []                 # (ts, session, text) from say verb
+        self.replies = []                    # (ts, sender, target, spec) from reply verb
 
     def apply(self, ev):
         s = ev["session"]
@@ -168,9 +169,11 @@ class SwarmIndex:
             self.session_status[s] = "blocked"
             self.session_action[s] = f"blocked: {obj} {detail_text}".strip()
         elif verb == "up":
-            self.resources[full_obj] = "UP"
+            self.resources[full_obj] = {"state": "UP", "addr": kvs.get("addr", "")}
         elif verb == "down":
-            self.resources[full_obj] = "DOWN"
+            existing = self.resources.get(full_obj, {})
+            prev_addr = existing.get("addr", "") if isinstance(existing, dict) else ""
+            self.resources[full_obj] = {"state": "DOWN", "addr": prev_addr}
         elif verb == "direct":
             self.directives.append((ev["ts"], obj, detail))
         elif verb == "ask":
@@ -195,6 +198,8 @@ class SwarmIndex:
             spec_id = kvs.get("spec")
             if spec_id:
                 self.msg_targets[spec_id] = obj  # obj = target session
+            # Track reply for reply-read indicator
+            self.replies.append((ev["ts"], s, obj, spec_id or ""))
             # Resolve all open questions from target→self
             self._resolve_questions_between(obj, s)
             if self.session_status.get(s) in (None, "unknown"):
@@ -206,16 +211,17 @@ class SwarmIndex:
             if s not in self.session_status or self.session_status[s] == "unknown":
                 self.session_status[s] = "active"
                 self.session_action[s] = f"say {obj}"
-        elif verb == "note":
+        elif verb in ("note", "log"):
             # v1: track ack for messages and resolve associated questions
+            # v1.2: "log" is the canonical name; "note" accepted for backward compat
             ack_id = kvs.get("ack")
             if ack_id:
                 self.msg_acks[ack_id].add(s)
                 self.answered_specs.add(ack_id)
-            # note events update last-seen but don't override active/blocked
+            # log/note events update last-seen but don't override active/blocked
             if s not in self.session_status or self.session_status[s] == "unknown":
                 self.session_status[s] = "active"
-                self.session_action[s] = f"note {obj}"
+                self.session_action[s] = f"log {obj}"
 
     def _resolve_questions_between(self, asker: str, replier: str):
         """Mark all open questions from asker→replier as resolved.
@@ -283,22 +289,20 @@ class SwarmIndex:
         if verb == "reply":
             return ev["obj"] == session
 
-        # Notes: filtered by type
-        if verb == "note":
+        # Notes/logs: filtered by type
+        if verb in ("note", "log"):
             if s == session:
                 return True  # already caught above, but explicit
             kvs = ev.get("kvs", {})
             ack_id = kvs.get("ack")
             if ack_id:
                 # Ack notes visible only to the session that sent the original msg
-                # msg_id like "msg/CART-001.md" → sender is "CART" (prefix before dash)
-                # But more reliably: check who asked with this spec
                 for q_ts, q_frm, q_to, q_detail in self.questions:
                     _, q_kvs = parse_detail_kvs(q_detail)
                     if q_kvs.get("spec") == ack_id and q_frm == session:
                         return True
                 return False
-            # Other notes from others: hide (spam filter)
+            # Other notes/logs from others: hide (spam filter)
             return False
 
         # All other events from other sessions: visible
@@ -534,15 +538,35 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
                 ls_ts = index.last_seen.get(p)
                 ls = _age_label(ls_ts) if ls_ts else "—"
                 st = index.session_status.get(p, "unknown")
-                lines.append(f"- **{p}**: {st}, last-seen {ls}")
+                # Reply-read indicator: check if last reply from us to this peer
+                # has been acked (spec consumed)
+                reply_tag = ""
+                last_reply_to_peer = None
+                for r_ts, r_sender, r_target, r_spec in reversed(index.replies):
+                    if r_sender == session and r_target == p:
+                        last_reply_to_peer = (r_ts, r_spec)
+                        break
+                if last_reply_to_peer:
+                    r_ts, r_spec = last_reply_to_peer
+                    if r_spec and r_spec in index.answered_specs:
+                        reply_tag = " (reply lido)"
+                    elif r_spec:
+                        reply_tag = " (reply pendente)"
+                lines.append(f"- **{p}**: {st}, last-seen {ls}{reply_tag}")
             lines.append("")
 
     lines.append("## RECURSOS COMPARTILHADOS")
     if resources:
-        lines.append("| recurso | estado |")
-        lines.append("|---|---|")
-        for r, state in sorted(resources.items()):
-            lines.append(f"| {r} | {state} |")
+        lines.append("| recurso | estado | endereço |")
+        lines.append("|---|---|---|")
+        for r, info in sorted(resources.items()):
+            if isinstance(info, dict):
+                state = info["state"]
+                addr = info.get("addr", "") or "—"
+            else:
+                state = info
+                addr = "—"
+            lines.append(f"| {r} | {state} | {addr} |")
     else:
         lines.append("Nenhum recurso registrado.")
     lines.append("")

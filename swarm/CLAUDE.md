@@ -20,13 +20,16 @@ A cada prompt, um hook injeta automaticamente a sua **myco view** como `addition
 | `done <objeto>` | terminei X | todos |
 | `need <objeto>` | preciso de X de outra sessão | todos |
 | `block <motivo>` | estou bloqueado | todos |
-| `up <recurso>` / `down <recurso>` | recurso subiu/caiu | todos |
+| `up <recurso>` | recurso subiu (use `addr:` para endereço) | todos |
+| `down <recurso>` | recurso caiu | todos |
 | `direct <sessão> <instrução>` | diretiva (DIRECTOR→worker) | destinatário |
 | `ask <destinatário> <pergunta>` | pergunta dirigida | destinatário |
 | `reply <destinatário> <resposta>` | resposta a pergunta | destinatário |
-| `note <texto>` | observação interna | **SÓ VOCÊ** |
+| `log <texto>` | observação interna | **SÓ VOCÊ** |
 
-**IMPORTANTE**: `note` é invisível para outras sessões. Para responder perguntas, use `reply`. Para confirmar recebimento de msg/, use `note ack ack:ID` (este caso especial é visível).
+**IMPORTANTE**: `log` é invisível para outras sessões. Para responder perguntas, use `reply`. Para confirmar recebimento de msg/, use `log ack ack:ID` (este caso especial é visível).
+
+> `note` é aceito como alias de `log` por compatibilidade.
 
 ## Convenções key:value
 
@@ -35,6 +38,7 @@ A cada prompt, um hook injeta automaticamente a sua **myco view** como `addition
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
 | `spec:` | spec ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
+| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
 
 ## Comunicação entre sessões
 
@@ -55,7 +59,7 @@ reply CART resposta spec:msg/AUTH-002.md
 ### Confirmar recebimento de msg/
 ```
 <myco>
-note ack ack:msg/CART-001.md
+log ack ack:msg/CART-001.md
 </myco>
 ```
 
@@ -82,8 +86,9 @@ A tabela de ARTEFATOS PUBLICADOS mostra o path absoluto de cada sessão.
 1. **Sempre** logue depois de agir (bloco `<myco>` no final da resposta)
 2. **Sempre** use o contexto injetado (sua view) para informar decisões
 3. **Nunca** edite arquivos de `view/` diretamente (são gerados pelo daemon)
-4. **Use `reply` para responder perguntas, NUNCA `note`**
+4. **Use `reply` para responder perguntas, NUNCA `log`**
 5. Se bloqueado, use `ask DIRECTOR <pergunta>`
 6. **Respeite as diretivas** — vêm do humano, prioridade absoluta
 7. Use `ref:` no `done` para publicar referências git concretas
 8. Use `peers/` para ler código de outras sessões
+9. Objetos devem ter **≤ 6 palavras hifenizadas**. Detalhes longos vão em `spec:msg/`

@@ -49,7 +49,7 @@ reply AUTH veja spec spec:msg/DIRECTOR-001.md
 | `direct <sessão> <instrução>` | emite diretiva (sessão ou `all`) |
 | `reply <sessão> <resposta>` | resposta a pergunta dirigida a você |
 | `ask <sessão> <pergunta>` | pergunta dirigida a uma sessão |
-| `note <observação>` | observação interna (invisível para outros) |
+| `log <observação>` | observação interna (invisível para outros) |
 
 ## Comunicação rica via msg/
 

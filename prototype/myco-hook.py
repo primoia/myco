@@ -47,7 +47,7 @@ TAG_RE = re.compile(r"<myco>(.*?)</myco>", re.DOTALL | re.IGNORECASE)
 
 VALID_VERBS = {
     "start", "done", "need", "block",
-    "up", "down", "direct", "ask", "note", "reply", "say",
+    "up", "down", "direct", "ask", "note", "log", "reply", "say",
 }
 
 

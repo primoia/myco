@@ -55,20 +55,22 @@ Exemplos:
 | `done` | terminei X, efeito publicado | `done auth.v2 ref:origin/feat/new-auth` |
 | `need` | declaro dependência (precondição) | `need AUTH.auth.v2` |
 | `block` | estou bloqueado | `block esperando-deploy-do-db` |
-| `up` | recurso subiu | `up container iam-db` |
+| `up` | recurso subiu (suporta `addr:`) | `up dev-server addr:http://192.168.0.214:7777` |
 | `down` | recurso caiu | `down endpoint /api/auth` |
 | `ask` | pergunta dirigida a outra sessão | `ask DIRECTOR preciso-de-specs` |
 | `reply` | resposta a uma pergunta | `reply BACK resposta spec:msg/AUTH-002.md` |
 | `say` | broadcast visível para TODAS as sessões | `say deploy-em-1min` |
 | `direct` | diretiva (só DIRECTOR usa) | `direct all usar-JWT-HS256` |
-| `note` | observação interna (invisível para outros) | `note ack ack:msg/CART-001.md` |
+| `log` | observação interna (invisível para outros) | `log ack ack:msg/CART-001.md` |
+
+> `note` é aceito como alias de `log` por compatibilidade.
 
 ### Semântica especial
 
 - **`ask`**: self-ask é rejeitado (target == sender → ignorado pelo daemon)
 - **`reply`**: resolve perguntas pendentes do target→sender e faz auto-ack de specs associados
 - **`say`**: aparece na seção BROADCASTS de todas as views
-- **`note`**: NUNCA visível para outras sessões — só serve para registros internos e acks
+- **`log`** (alias: `note`): NUNCA visível para outras sessões — só serve para registros internos e acks
 - **`direct`**: aparece no topo de todas as views com prioridade máxima
 
 ## Convenções key:value
@@ -80,12 +82,21 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
 | `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
+| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
 
 Exemplo completo:
 
 ```
 done auth-api-v2 ref:origin/feat/new-login spec:msg/AUTH-003.md
 ```
+
+## Convenções de slug
+
+O campo `<objeto>` nos verbos deve ser curto e legível:
+
+- **Máximo 6 palavras hifenizadas** (ex: `login-endpoint`, `auth-api-v2`, `db-migration-users`)
+- Detalhes longos vão em `spec:msg/` — não no objeto
+- Evitar handles como `servidor-nao-alcancavel-do-meu-sandbox-localhost-7777` — use `servidor-inalcancavel` e detalhe em spec
 
 ## Mensagens ricas (msg/)
 
@@ -185,9 +196,9 @@ Nenhum.
 - **AUTH**: idle, last-seen 12s
 
 ## RECURSOS COMPARTILHADOS
-| recurso | estado |
-|---|---|
-| container iam-db | UP |
+| recurso | estado | endereço |
+|---|---|---|
+| container iam-db | UP | — |
 
 ## EVENTOS RELEVANTES (últimos 15)
 ...
@@ -221,8 +232,8 @@ O daemon filtra eventos por sessão antes de renderizar a view:
 | `direct`, `say` | Todas as sessões |
 | `ask` endereçado a mim | Sempre visível |
 | `reply` | Só sender e target |
-| `note` com `ack:` | Só quem enviou a msg original |
-| `note` de outros | Invisível (spam filter) |
+| `log`/`note` com `ack:` | Só quem enviou a msg original |
+| `log`/`note` de outros | Invisível (spam filter) |
 | Outros eventos | Todas as sessões |
 
 Filtro atual: **all-see-all** para eventos estruturais (start, done, need, block, up, down). Preparado para filtros mais seletivos em swarms maiores.

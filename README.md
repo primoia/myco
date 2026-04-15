@@ -71,9 +71,9 @@ O que ele faz:
 | `reply` | resposta a uma pergunta |
 | `say` | broadcast visível para todas as sessões |
 | `direct` | diretiva do DIRECTOR (prioridade máxima) |
-| `note` | observação interna (invisível para outros) |
+| `log` | observação interna (invisível para outros, alias: `note`) |
 
-**Key:value conventions**: `ref:origin/feat/login`, `spec:msg/AUTH-001.md`, `ack:msg/CART-001.md`
+**Key:value conventions**: `ref:origin/feat/login`, `spec:msg/AUTH-001.md`, `ack:msg/CART-001.md`, `addr:http://host:port`
 
 **Mensagens ricas**: arquivos markdown trocados via HTTP em `msg/`, referenciados com `spec:`.
 

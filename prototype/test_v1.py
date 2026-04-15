@@ -73,6 +73,11 @@ class TestParseDetailKvs:
         assert kvs == {"ref": "master", "spec": "msg/A.md"}
         assert "foo:bar" in text
 
+    def test_addr_key(self):
+        text, kvs = parse_detail_kvs("dev-server addr:http://192.168.0.214:7777")
+        assert kvs == {"addr": "http://192.168.0.214:7777"}
+        assert text == "dev-server"
+
 
 # ============================================================
 # parse_event
@@ -189,23 +194,37 @@ class TestSwarmIndexApply:
     def test_up(self):
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH up database"))
-        assert idx.resources["database"] == "UP"
+        assert idx.resources["database"]["state"] == "UP"
+        assert idx.resources["database"]["addr"] == ""
 
     def test_up_multi_token(self):
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH up container iam-db"))
-        assert idx.resources["container iam-db"] == "UP"
+        assert idx.resources["container iam-db"]["state"] == "UP"
 
     def test_down(self):
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH down database"))
-        assert idx.resources["database"] == "DOWN"
+        assert idx.resources["database"]["state"] == "DOWN"
 
     def test_up_then_down(self):
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH up database"))
         idx.apply(self._ev("AUTH", "T1 AUTH down database"))
-        assert idx.resources["database"] == "DOWN"
+        assert idx.resources["database"]["state"] == "DOWN"
+
+    def test_up_with_addr(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        assert idx.resources["dev-server"]["state"] == "UP"
+        assert idx.resources["dev-server"]["addr"] == "http://192.168.0.214:7777"
+
+    def test_down_preserves_addr(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        idx.apply(self._ev("AUTH", "T1 AUTH down dev-server"))
+        assert idx.resources["dev-server"]["state"] == "DOWN"
+        assert idx.resources["dev-server"]["addr"] == "http://192.168.0.214:7777"
 
     def test_direct(self):
         idx = SwarmIndex()
@@ -263,6 +282,31 @@ class TestSwarmIndexApply:
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH note just a note"))
         assert len(idx.msg_acks) == 0
+
+    def test_log_basic(self):
+        """log verb works same as note."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("AUTH", "T0 AUTH log observacao"))
+        assert idx.session_status["AUTH"] == "active"
+
+    def test_log_with_ack(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("AUTH", "T0 AUTH log recebido ack:msg/CART-001.md"))
+        assert "AUTH" in idx.msg_acks["msg/CART-001.md"]
+
+    def test_log_doesnt_overwrite_active(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("AUTH", "T0 AUTH start login"))
+        idx.apply(self._ev("AUTH", "T1 AUTH log progress"))
+        assert idx.session_status["AUTH"] == "active"
+        assert idx.session_action["AUTH"] == "start login"
+
+    def test_note_backward_compat(self):
+        """note verb still works as alias for log."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("AUTH", "T0 AUTH note observacao"))
+        assert idx.session_status["AUTH"] == "active"
+        assert idx.session_action["AUTH"] == "log observacao"
 
 
 # ============================================================
@@ -329,6 +373,13 @@ class TestVisibilityFilter:
         idx.apply(ev)
         assert not idx._is_visible(ev, "CART")
         assert idx._is_visible(ev, "AUTH")  # own notes visible
+
+    def test_log_hidden_from_others(self):
+        idx = SwarmIndex()
+        ev = parse_event("AUTH", "T0 AUTH log internal stuff")
+        idx.apply(ev)
+        assert not idx._is_visible(ev, "CART")
+        assert idx._is_visible(ev, "AUTH")  # own logs visible
 
     def test_start_done_visible_to_others(self):
         idx = SwarmIndex()
@@ -524,6 +575,14 @@ class TestRenderViewWorker:
         assert "UP" in view
         assert "redis" in view
         assert "DOWN" in view
+        assert "endereço" in view
+
+    def test_resources_addr_shown(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        view = render_view(idx, "AUTH")
+        assert "http://192.168.0.214:7777" in view
+        assert "dev-server" in view
 
     def test_no_resources_message(self):
         idx = SwarmIndex()
@@ -2230,6 +2289,74 @@ class TestMsgSecurity:
                 assert resp.status == 200
         finally:
             server.shutdown()
+
+
+# ============================================================
+# reply-read indicator in PEERS
+# ============================================================
+
+class TestReplyReadIndicator:
+    def test_reply_pending_shown_in_peers(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH start login"))
+        idx.apply(parse_event("CART", "T1 CART start checkout"))
+        idx.apply(parse_event("AUTH", "T2 AUTH reply CART resposta spec:msg/AUTH-001.md"))
+        view = render_view(idx, "AUTH")
+        assert "reply pendente" in view
+
+    def test_reply_read_shown_in_peers(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH start login"))
+        idx.apply(parse_event("CART", "T1 CART start checkout"))
+        idx.apply(parse_event("AUTH", "T2 AUTH reply CART resposta spec:msg/AUTH-001.md"))
+        # CART acks the msg
+        idx.apply(parse_event("CART", "T3 CART log ok ack:msg/AUTH-001.md"))
+        view = render_view(idx, "AUTH")
+        assert "reply lido" in view
+
+    def test_reply_no_spec_no_indicator(self):
+        """Replies without spec: don't show pending/read indicator."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH start login"))
+        idx.apply(parse_event("CART", "T1 CART start checkout"))
+        idx.apply(parse_event("AUTH", "T2 AUTH reply CART resposta-simples"))
+        view = render_view(idx, "AUTH")
+        assert "reply pendente" not in view
+        assert "reply lido" not in view
+
+    def test_replies_tracked(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH reply CART algo spec:msg/AUTH-001.md"))
+        assert len(idx.replies) == 1
+        assert idx.replies[0] == ("T0", "AUTH", "CART", "msg/AUTH-001.md")
+
+
+# ============================================================
+# log verb in backward compat scenarios
+# ============================================================
+
+class TestLogVerbBackwardCompat:
+    def test_v0_note_events_still_work(self):
+        """Old note events are still processed correctly."""
+        idx = SwarmIndex()
+        events = [
+            ("AUTH", "T0 AUTH start login"),
+            ("AUTH", "T1 AUTH note progress-update"),
+            ("AUTH", "T2 AUTH note ok ack:msg/CART-001.md"),
+        ]
+        for sess, line in events:
+            ev = parse_event(sess, line)
+            assert ev is not None
+            idx.apply(ev)
+        assert "AUTH" in idx.msg_acks["msg/CART-001.md"]
+
+    def test_log_and_note_mixed(self):
+        """Both log and note accepted in same swarm."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH log internal-a"))
+        idx.apply(parse_event("CART", "T1 CART note internal-b"))
+        assert idx.session_status["AUTH"] == "active"
+        assert idx.session_status["CART"] == "active"
 
 
 if __name__ == "__main__":
