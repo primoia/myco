@@ -29,9 +29,17 @@ Um serviço externo captura esse bloco e distribui para as outras sessões. **N�
 - `up <recurso>` / `down <recurso>` — recurso subiu/caiu
 - `ask <destinatário> <pergunta>` — pergunta dirigida (use `spec:` para specs ricas)
 - `reply <destinatário> <resposta>` — resposta a uma pergunta (use `spec:` para detalhes)
+- `say <texto>` — broadcast visível para TODAS as sessões (use para avisos gerais)
 - `note <texto>` — observação interna (ATENÇÃO: `note` NÃO é visível para outras sessões! Use `reply` para responder perguntas)
 
 ## Comunicação entre sessões
+
+### Broadcast (aviso a todos)
+```
+<myco>
+say vou-reiniciar-o-banco-em-1min
+</myco>
+```
 
 ### Perguntar
 ```
@@ -79,8 +87,8 @@ Mensagens ricas são arquivos markdown trocados via HTTP pelo daemon.
 
 Quando a seção **MENSAGENS PENDENTES** da sua view mostrar uma mensagem:
 
-1. **Leia via HTTP**: `curl -H "Authorization: Bearer $MYCO_TOKEN" $MYCO_URL/msg/ARQUIVO.md`
-2. **Confirme leitura** no `<myco>` block: `note ack ack:msg/ARQUIVO.md`
+1. **Leia via HTTP**: `curl -H "Authorization: Bearer $MYCO_TOKEN" "$MYCO_URL/msg/ARQUIVO.md?session=$MYCO_SESSION"`
+   (o parâmetro `?session=` faz ack automático — não precisa confirmar manualmente)
 
 ## Acessar código de outras sessões
 

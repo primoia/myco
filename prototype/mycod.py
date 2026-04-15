@@ -28,6 +28,7 @@ import threading
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 
 # ---------- Event parsing ----------
@@ -110,11 +111,14 @@ class SwarmIndex:
         self.msg_targets = {}              # msg_id → target session
         self.answered_specs = set()        # spec ids that have been acked
         self.resolved_questions = set()    # (frm, to, ts) tuples resolved by reply
+        self.last_seen = {}                  # session → timestamp string
+        self.broadcasts = []                 # (ts, session, text) from say verb
 
     def apply(self, ev):
         s = ev["session"]
         self.sessions_known.add(s)
         self.events.append(ev)
+        self.last_seen[s] = ev["ts"]
 
         verb = ev["verb"]
         obj = ev["obj"]
@@ -178,6 +182,12 @@ class SwarmIndex:
             if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
                 self.session_action[s] = f"reply {obj}"
+        elif verb == "say":
+            # Broadcast visible to all sessions
+            self.broadcasts.append((ev["ts"], s, f"{obj} {detail_text}".strip()))
+            if s not in self.session_status or self.session_status[s] == "unknown":
+                self.session_status[s] = "active"
+                self.session_action[s] = f"say {obj}"
         elif verb == "note":
             # v1: track ack for messages and resolve associated questions
             ack_id = kvs.get("ack")
@@ -243,8 +253,8 @@ class SwarmIndex:
         if s == session:
             return True
 
-        # Directives: always visible
-        if verb == "direct":
+        # Directives and broadcasts: always visible
+        if verb in ("direct", "say"):
             return True
 
         # Questions addressed to us: always visible
@@ -325,6 +335,30 @@ class SwarmIndex:
 
 # ---------- Rendering ----------
 
+QUESTION_TTL_SECONDS = 1800  # 30 minutes
+
+
+def _parse_ts(ts_str: str) -> float:
+    """Parse ISO timestamp to epoch seconds. Returns 0.0 on failure."""
+    try:
+        return time.mktime(time.strptime(ts_str, "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+def _age_label(ts_str: str) -> str:
+    """Human-readable age from an ISO timestamp."""
+    epoch = _parse_ts(ts_str)
+    if epoch == 0.0:
+        return "?"
+    delta = time.time() - epoch
+    if delta < 60:
+        return f"{int(delta)}s"
+    if delta < 3600:
+        return f"{int(delta // 60)}min"
+    return f"{delta / 3600:.1f}h"
+
+
 def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
                 session_dirs: dict = None) -> str:
     blockers = index.blockers_for(session)
@@ -334,7 +368,8 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
     events = index.recent_events_for(session, limit=15)
     status = index.session_status.get(session, "unknown")
     action = index.session_action.get(session, "no recent action")
-    # Filter questions: only show those relevant to this session and not yet answered
+    now = time.time()
+    # Filter questions: only show those relevant to this session, not answered, not expired
     my_questions = []
     for q in index.questions:
         ts, frm, to, detail = q
@@ -347,6 +382,10 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
             continue
         # Check if resolved by a reply
         if (frm, to, ts) in index.resolved_questions:
+            continue
+        # TTL: skip questions older than threshold
+        q_epoch = _parse_ts(ts)
+        if q_epoch > 0 and (now - q_epoch) > QUESTION_TTL_SECONDS:
             continue
         my_questions.append(q)
     msg_dir = swarm_dir / "msg" if swarm_dir else None
@@ -362,14 +401,15 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
         lines.append(f"Swarm com {len(workers)} sessões worker ativas.")
         if workers:
             lines.append("")
-            lines.append("| sessão | status | última ação | bloqueadores | dependentes |")
-            lines.append("|---|---|---|---|---|")
+            lines.append("| sessão | status | última ação | last-seen | bloqueadores | dependentes |")
+            lines.append("|---|---|---|---|---|---|")
             for s in workers:
                 st = index.session_status.get(s, "unknown")
                 ac = index.session_action.get(s, "—")
+                ls = _age_label(index.last_seen.get(s, "")) if index.last_seen.get(s) else "—"
                 bl = ", ".join(index.blockers_for(s)) or "—"
                 dp = ", ".join(index.dependents_of(s)) or "—"
-                lines.append(f"| {s} | {st} | {ac} | {bl} | {dp} |")
+                lines.append(f"| {s} | {st} | {ac} | {ls} | {bl} | {dp} |")
     else:
         lines.append(f"Status: **{status}** — {action}")
         if blockers:
@@ -459,6 +499,25 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
         else:
             lines.append("Nenhum conflito detectado.")
         lines.append("")
+
+    # BROADCASTS (say verb)
+    if index.broadcasts:
+        lines.append("## BROADCASTS")
+        for ts, sender, text in index.broadcasts[-5:]:
+            lines.append(f"- [{ts}] **{sender}**: {text}")
+        lines.append("")
+
+    # PEERS (last-seen) — worker views only
+    if session != "DIRECTOR":
+        peers = sorted(s for s in index.sessions_known if s != session and s != "DIRECTOR")
+        if peers:
+            lines.append("## PEERS")
+            for p in peers:
+                ls_ts = index.last_seen.get(p)
+                ls = _age_label(ls_ts) if ls_ts else "—"
+                st = index.session_status.get(p, "unknown")
+                lines.append(f"- **{p}**: {st}, last-seen {ls}")
+            lines.append("")
 
     lines.append("## RECURSOS COMPARTILHADOS")
     if resources:
@@ -765,7 +824,8 @@ class MycoHandler(BaseHTTPRequestHandler):
                 view = daemon.view_cache.get(session, "")
             self._respond(200, view, content_type="text/markdown; charset=utf-8")
         elif self.path.startswith("/msg/"):
-            filename = self.path[5:].strip("/")
+            parsed = urlparse(self.path)
+            filename = parsed.path[5:].strip("/")
             if not filename or "/" in filename or ".." in filename:
                 self._respond(400, "invalid filename")
                 return
@@ -774,6 +834,16 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(404, "not found")
                 return
             content = msg_file.read_text(errors="replace")
+            # Auto-ack: if ?session=X is provided, mark msg as read by that session
+            qs = parse_qs(parsed.query)
+            reader = qs.get("session", [None])[0]
+            if reader:
+                msg_id = f"msg/{filename}"
+                daemon = self.server.daemon_ref
+                with daemon.lock:
+                    daemon.index.msg_acks[msg_id].add(reader.upper())
+                    daemon.index.answered_specs.add(msg_id)
+                    daemon._render_to_cache()
             self._respond(200, content, content_type="text/markdown; charset=utf-8")
         elif self.path == "/status":
             daemon = self.server.daemon_ref

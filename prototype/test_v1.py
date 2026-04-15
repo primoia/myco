@@ -1940,6 +1940,166 @@ class TestMsgHTTP:
             server.shutdown()
 
 
+# ============================================================
+# say verb (broadcast)
+# ============================================================
+
+class TestSayVerb:
+    def test_say_parsed_and_stored(self):
+        from mycod import SwarmIndex, parse_event
+        idx = SwarmIndex()
+        ev = parse_event("FRONT", "T0 FRONT say reiniciando-banco-em-1min")
+        idx.apply(ev)
+        assert len(idx.broadcasts) == 1
+        assert idx.broadcasts[0][1] == "FRONT"
+        assert "reiniciando-banco-em-1min" in idx.broadcasts[0][2]
+
+    def test_say_visible_to_all(self):
+        from mycod import SwarmIndex, parse_event
+        idx = SwarmIndex()
+        ev = parse_event("FRONT", "T0 FRONT say aviso-geral")
+        idx.apply(ev)
+        assert idx._is_visible(ev, "BACK") is True
+        assert idx._is_visible(ev, "DIRECTOR") is True
+        assert idx._is_visible(ev, "FRONT") is True
+
+    def test_say_in_view(self):
+        from mycod import SwarmIndex, parse_event, render_view
+        idx = SwarmIndex()
+        idx.apply(parse_event("FRONT", "T0 FRONT say deploy-em-5min"))
+        view = render_view(idx, "BACK")
+        assert "BROADCASTS" in view
+        assert "deploy-em-5min" in view
+        assert "FRONT" in view
+
+    def test_say_not_in_view_when_empty(self):
+        from mycod import SwarmIndex, render_view
+        idx = SwarmIndex()
+        view = render_view(idx, "BACK")
+        assert "BROADCASTS" not in view
+
+
+# ============================================================
+# last-seen timestamps
+# ============================================================
+
+class TestLastSeen:
+    def test_last_seen_tracked(self):
+        from mycod import SwarmIndex, parse_event
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "2026-01-01T10:00:00 AUTH start login"))
+        idx.apply(parse_event("AUTH", "2026-01-01T10:05:00 AUTH done login"))
+        assert idx.last_seen["AUTH"] == "2026-01-01T10:05:00"
+
+    def test_last_seen_in_director_view(self):
+        from mycod import SwarmIndex, parse_event, render_view
+        idx = SwarmIndex()
+        idx.sessions_known.add("DIRECTOR")
+        idx.apply(parse_event("AUTH", "2026-01-01T10:00:00 AUTH start login"))
+        view = render_view(idx, "DIRECTOR")
+        assert "last-seen" in view
+
+    def test_peers_section_in_worker_view(self):
+        from mycod import SwarmIndex, parse_event, render_view
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "2026-01-01T10:00:00 AUTH start login"))
+        idx.apply(parse_event("CART", "2026-01-01T10:01:00 CART start checkout"))
+        view = render_view(idx, "AUTH")
+        assert "## PEERS" in view
+        assert "CART" in view
+
+    def test_peers_not_in_director_view(self):
+        from mycod import SwarmIndex, parse_event, render_view
+        idx = SwarmIndex()
+        idx.sessions_known.add("DIRECTOR")
+        idx.apply(parse_event("AUTH", "2026-01-01T10:00:00 AUTH start login"))
+        view = render_view(idx, "DIRECTOR")
+        assert "## PEERS" not in view
+
+
+# ============================================================
+# Auto-ack on GET /msg/?session=
+# ============================================================
+
+class TestAutoAck:
+    @staticmethod
+    def _start_server(tmp_path):
+        from mycod import Daemon, MycoHTTPServer, MycoHandler
+        d = Daemon(tmp_path)
+        d.index.sessions_known.add("DIRECTOR")
+        d._render_to_cache()
+        server = MycoHTTPServer(("127.0.0.1", 0), MycoHandler, d)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        return server, port, d
+
+    def test_get_msg_with_session_auto_acks(self, tmp_path):
+        import urllib.request
+        server, port, d = self._start_server(tmp_path)
+        try:
+            # Setup: create msg and a question referencing it
+            (tmp_path / "msg" / "CART-001.md").write_text("spec content")
+            from mycod import parse_event
+            d.index.apply(parse_event("CART", "T0 CART ask AUTH help spec:msg/CART-001.md"))
+            # GET with ?session=AUTH triggers auto-ack
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/msg/CART-001.md?session=AUTH")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                assert resp.status == 200
+            # msg should now be acked
+            assert "AUTH" in d.index.msg_acks.get("msg/CART-001.md", set())
+            assert "msg/CART-001.md" in d.index.answered_specs
+        finally:
+            server.shutdown()
+
+    def test_get_msg_without_session_no_ack(self, tmp_path):
+        import urllib.request
+        server, port, d = self._start_server(tmp_path)
+        try:
+            (tmp_path / "msg" / "CART-001.md").write_text("spec content")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/msg/CART-001.md")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                assert resp.status == 200
+            # No auto-ack without session param
+            assert len(d.index.msg_acks.get("msg/CART-001.md", set())) == 0
+        finally:
+            server.shutdown()
+
+
+# ============================================================
+# Question TTL
+# ============================================================
+
+class TestQuestionTTL:
+    def test_old_question_expires(self):
+        import time as _time
+        from mycod import SwarmIndex, parse_event, render_view, QUESTION_TTL_SECONDS
+        idx = SwarmIndex()
+        # Question from 2 hours ago
+        old_ts = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(_time.time() - 7200))
+        idx.apply(parse_event("CART", f"{old_ts} CART ask AUTH help-me"))
+        view = render_view(idx, "AUTH")
+        # Should NOT show in pending questions (expired)
+        assert "help-me" not in view.split("## PERGUNTAS PENDENTES")[1].split("##")[0]
+
+    def test_recent_question_visible(self):
+        import time as _time
+        from mycod import SwarmIndex, parse_event, render_view
+        idx = SwarmIndex()
+        # Question from 5 minutes ago
+        recent_ts = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(_time.time() - 300))
+        idx.apply(parse_event("CART", f"{recent_ts} CART ask AUTH help-me"))
+        view = render_view(idx, "AUTH")
+        assert "help-me" in view
+
+    def test_ttl_default_30min(self):
+        from mycod import QUESTION_TTL_SECONDS
+        assert QUESTION_TTL_SECONDS == 1800
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
