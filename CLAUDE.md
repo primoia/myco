@@ -68,18 +68,18 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 
 ## Comunicação rica via msg/
 
-O diretório de mensagens fica em `$MYCO_SWARM/msg/`.
+Mensagens ricas são arquivos markdown trocados via HTTP pelo daemon.
 
 ### Enviar uma mensagem
 
-1. **Crie o arquivo** via Bash: `echo "conteúdo" > $MYCO_SWARM/msg/SUASESSAO-001.md`
+1. **Crie via HTTP**: `curl -X POST -H "Authorization: Bearer $MYCO_TOKEN" -d "conteúdo" $MYCO_URL/msg/SUASESSAO-001.md`
 2. **Referencie no `<myco>` block**: `ask DESTINO pergunta spec:msg/SUASESSAO-001.md`
 
 ### Receber uma mensagem
 
 Quando a seção **MENSAGENS PENDENTES** da sua view mostrar uma mensagem:
 
-1. **Leia o arquivo** com a tool Read (o path completo aparece na view)
+1. **Leia via HTTP**: `curl -H "Authorization: Bearer $MYCO_TOKEN" $MYCO_URL/msg/ARQUIVO.md`
 2. **Confirme leitura** no `<myco>` block: `note ack ack:msg/ARQUIVO.md`
 
 ## Acessar código de outras sessões

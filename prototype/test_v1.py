@@ -588,7 +588,7 @@ class TestRenderViewWorker:
         assert "msg/CART-001.md" in view
         # Should include absolute path so Claude can Read it directly
         assert str(msg_dir / "CART-001.md") in view
-        assert "leia com Read" in view
+        assert "curl $MYCO_URL/msg/CART-001.md" in view
 
     def test_no_pending_msgs(self):
         idx = SwarmIndex()
@@ -1853,6 +1853,89 @@ class TestHealthz:
             with urllib.request.urlopen(req, timeout=2) as resp:
                 body = json.loads(resp.read())
                 assert body["sessions"] >= 3  # DIRECTOR + AUTH + CART
+        finally:
+            server.shutdown()
+
+
+# ============================================================
+# msg/ HTTP endpoints
+# ============================================================
+
+class TestMsgHTTP:
+    """Test GET/POST /msg/ endpoints."""
+
+    @staticmethod
+    def _start_server(tmp_path):
+        from mycod import Daemon, MycoHTTPServer, MycoHandler
+        d = Daemon(tmp_path)
+        d.index.sessions_known.add("DIRECTOR")
+        d._render_to_cache()
+        server = MycoHTTPServer(("127.0.0.1", 0), MycoHandler, d)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        return server, port, d
+
+    def test_post_and_get_msg(self, tmp_path):
+        """POST creates a msg file, GET retrieves it."""
+        import urllib.request, json
+        server, port, d = self._start_server(tmp_path)
+        try:
+            # POST to create
+            content = "# Auth API spec\nEndpoint: POST /login"
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/msg/AUTH-001.md",
+                data=content.encode(),
+                headers={"Content-Type": "text/plain"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read())
+                assert body["ok"] is True
+            # GET to read
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/msg/AUTH-001.md")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                assert resp.status == 200
+                assert resp.read().decode() == content
+        finally:
+            server.shutdown()
+
+    def test_get_msg_not_found(self, tmp_path):
+        import urllib.request, urllib.error
+        server, port, d = self._start_server(tmp_path)
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/msg/NOPE.md")
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 404"
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+        finally:
+            server.shutdown()
+
+    def test_msg_path_traversal_blocked(self, tmp_path):
+        """Path traversal attempts should be rejected."""
+        import urllib.request, urllib.error
+        server, port, d = self._start_server(tmp_path)
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/msg/../../../etc/passwd")
+            try:
+                urllib.request.urlopen(req, timeout=2)
+                assert False, "expected 400"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+        finally:
+            server.shutdown()
+
+    def test_msg_preexisting_file(self, tmp_path):
+        """GET works for msg files created outside HTTP (local sessions)."""
+        import urllib.request
+        server, port, d = self._start_server(tmp_path)
+        try:
+            (tmp_path / "msg" / "CART-001.md").write_text("local msg content")
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/msg/CART-001.md")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                assert resp.read().decode() == "local msg content"
         finally:
             server.shutdown()
 

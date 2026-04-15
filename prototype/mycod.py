@@ -495,7 +495,7 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
     lines.append("## MENSAGENS PENDENTES")
     if pending_msgs:
         for msg in pending_msgs:
-            lines.append(f"- De **{msg['sender']}**: `{msg['id']}` (path: `{msg['path']}`) — leia com Read e faça `note ack ack:{msg['id']}`")
+            lines.append(f"- De **{msg['sender']}**: `{msg['id']}` — leia com `curl $MYCO_URL/{msg['id']}` ou `Read {msg['path']}` e faça `note ack ack:{msg['id']}`")
     else:
         lines.append("Nenhuma mensagem pendente.")
     lines.append("")
@@ -764,6 +764,17 @@ class MycoHandler(BaseHTTPRequestHandler):
             with daemon.lock:
                 view = daemon.view_cache.get(session, "")
             self._respond(200, view, content_type="text/markdown; charset=utf-8")
+        elif self.path.startswith("/msg/"):
+            filename = self.path[5:].strip("/")
+            if not filename or "/" in filename or ".." in filename:
+                self._respond(400, "invalid filename")
+                return
+            msg_file = self.server.daemon_ref.swarm_dir / "msg" / filename
+            if not msg_file.exists():
+                self._respond(404, "not found")
+                return
+            content = msg_file.read_text(errors="replace")
+            self._respond(200, content, content_type="text/markdown; charset=utf-8")
         elif self.path == "/status":
             daemon = self.server.daemon_ref
             with daemon.lock:
@@ -791,6 +802,18 @@ class MycoHandler(BaseHTTPRequestHandler):
                 return
             self.server.daemon_ref.ingest_events(session, events)
             self._respond(200, json.dumps({"ok": True, "count": len(events)}),
+                          content_type="application/json")
+        elif self.path.startswith("/msg/"):
+            filename = self.path[5:].strip("/")
+            if not filename or "/" in filename or ".." in filename:
+                self._respond(400, json.dumps({"ok": False, "error": "invalid filename"}),
+                              content_type="application/json")
+                return
+            body = self._read_body()
+            msg_dir = self.server.daemon_ref.swarm_dir / "msg"
+            msg_dir.mkdir(parents=True, exist_ok=True)
+            (msg_dir / filename).write_text(body)
+            self._respond(200, json.dumps({"ok": True}),
                           content_type="application/json")
         elif self.path.startswith("/dispatch/"):
             session = self.path[10:].strip("/").upper()
