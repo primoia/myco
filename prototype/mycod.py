@@ -16,8 +16,14 @@ The swarm directory must contain:
     view/   - per-session curated views (written by daemon)
 
 Protocol v1. See docs/PROTOCOL.md for the event format.
+
+Multi-channel support (v1.4):
+    If MYCO_TOKEN is configured, the daemon operates in multi-channel mode.
+    Each unique token creates an isolated channel (identified by SHA256 hash).
+    Channels are completely isolated - no cross-channel visibility.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -29,6 +35,114 @@ from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+
+# ---------- Security: token validation and rate limiting ----------
+
+MIN_TOKEN_LENGTH = 32
+MIN_TOKEN_ENTROPY_BITS = 80  # roughly 16 random chars
+
+
+def _token_to_channel_id(token: str) -> str:
+    """Hash token to channel identifier. Uses SHA256 for isolation."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _estimate_entropy(s: str) -> float:
+    """Estimate Shannon entropy of a string in bits."""
+    from math import log2
+    if not s:
+        return 0.0
+    freq = defaultdict(int)
+    for c in s:
+        freq[c] += 1
+    entropy = 0.0
+    for count in freq.values():
+        p = count / len(s)
+        entropy -= p * log2(p)
+    return entropy * len(s)
+
+
+def _validate_token_strength(token: str) -> tuple[bool, str]:
+    """Check if token meets minimum security requirements.
+    Returns (valid, error_message).
+
+    Requirements:
+    - At least MIN_TOKEN_LENGTH characters
+    - Minimum entropy (prevents '00000000000000000000000000000000')
+    - No obvious patterns
+    """
+    if len(token) < MIN_TOKEN_LENGTH:
+        return False, f"token too short (min {MIN_TOKEN_LENGTH} chars)"
+
+    entropy = _estimate_entropy(token)
+    if entropy < MIN_TOKEN_ENTROPY_BITS:
+        return False, f"token too weak (low entropy: {entropy:.1f} < {MIN_TOKEN_ENTROPY_BITS} bits)"
+
+    # Check for obvious patterns
+    if token == token[0] * len(token):
+        return False, "token is all same character"
+
+    return True, ""
+
+
+class RateLimiter:
+    """Simple rate limiter to prevent brute-force token guessing.
+
+    Tracks failed auth attempts per IP. After N failures in a time window,
+    reject all requests from that IP for a cooldown period.
+    """
+
+    def __init__(self, max_failures=5, window_seconds=60, cooldown_seconds=300):
+        self.max_failures = max_failures
+        self.window_seconds = window_seconds
+        self.cooldown_seconds = cooldown_seconds
+        self.failures = defaultdict(list)  # ip -> [timestamps]
+        self.banned_until = {}  # ip -> timestamp
+        self.lock = threading.Lock()
+
+    def is_allowed(self, ip: str) -> tuple[bool, str]:
+        """Check if IP is allowed to make auth attempts.
+        Returns (allowed, reason)."""
+        with self.lock:
+            now = time.time()
+
+            # Check if banned
+            if ip in self.banned_until:
+                if now < self.banned_until[ip]:
+                    remaining = int(self.banned_until[ip] - now)
+                    return False, f"too many failed attempts, retry in {remaining}s"
+                else:
+                    del self.banned_until[ip]
+                    self.failures[ip] = []
+
+            return True, ""
+
+    def record_failure(self, ip: str):
+        """Record a failed auth attempt."""
+        with self.lock:
+            now = time.time()
+
+            # Clean old failures outside window
+            self.failures[ip] = [
+                ts for ts in self.failures[ip]
+                if now - ts < self.window_seconds
+            ]
+
+            # Add new failure
+            self.failures[ip].append(now)
+
+            # Ban if too many failures
+            if len(self.failures[ip]) >= self.max_failures:
+                self.banned_until[ip] = now + self.cooldown_seconds
+
+    def record_success(self, ip: str):
+        """Record a successful auth (clears failure count)."""
+        with self.lock:
+            if ip in self.failures:
+                del self.failures[ip]
+            if ip in self.banned_until:
+                del self.banned_until[ip]
 
 
 # ---------- Message sanitization ----------
@@ -851,49 +965,224 @@ class Daemon:
 
 
 
+# ---------- Multi-channel support ----------
+
+class ChannelManager:
+    """Manages multiple isolated channels, one per unique token.
+
+    Each channel is a completely isolated Daemon instance with its own
+    log/, view/, msg/ directories. Channels are identified by SHA256(token).
+
+    Security features:
+    - Token strength validation (min length, entropy)
+    - Rate limiting per IP to prevent brute-force
+    - Zero cross-channel visibility
+    """
+
+    def __init__(self, base_dir: Path, verbose: bool = False):
+        self.base_dir = base_dir
+        self.channels_dir = base_dir / "channels"
+        self.channels_dir.mkdir(parents=True, exist_ok=True)
+        self.verbose = verbose
+
+        # channel_id -> Daemon instance
+        self.daemons = {}
+        self.lock = threading.Lock()
+
+        # Rate limiting
+        self.rate_limiter = RateLimiter(
+            max_failures=5,
+            window_seconds=60,
+            cooldown_seconds=300,
+        )
+
+        # Reload existing channels from disk
+        self._reload_channels()
+
+    def _reload_channels(self):
+        """Scan channels/ directory and initialize Daemon for each existing channel."""
+        for channel_dir in self.channels_dir.iterdir():
+            if not channel_dir.is_dir():
+                continue
+            channel_id = channel_dir.name
+            if channel_id not in self.daemons:
+                try:
+                    daemon = Daemon(channel_dir, verbose=self.verbose)
+                    # Initialize: ensure DIRECTOR exists, replay logs
+                    (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
+                    daemon.index.sessions_known.add("DIRECTOR")
+                    daemon.scan_once()
+                    daemon._render_to_cache()
+                    self.daemons[channel_id] = daemon
+                    if self.verbose:
+                        print(f"[channel-mgr] loaded channel {channel_id[:8]}...", file=sys.stderr)
+                except Exception as e:
+                    print(f"[channel-mgr] failed to load channel {channel_id}: {e}", file=sys.stderr)
+
+    def authenticate(self, token: str, client_ip: str, allow_create: bool = True) -> tuple[Daemon | None, str]:
+        """Authenticate token and return the corresponding Daemon.
+
+        Args:
+            token: The auth token
+            client_ip: Client IP for rate limiting
+            allow_create: If True, create new channel for valid new tokens
+
+        Returns:
+            (daemon, error_message)
+            daemon is None if auth failed.
+        """
+        # Rate limit check
+        allowed, reason = self.rate_limiter.is_allowed(client_ip)
+        if not allowed:
+            return None, reason
+
+        # Empty token → reject
+        if not token:
+            self.rate_limiter.record_failure(client_ip)
+            return None, "missing token"
+
+        channel_id = _token_to_channel_id(token)
+        channel_dir = self.channels_dir / channel_id
+
+        # Existing channel: grant access
+        if channel_id in self.daemons:
+            self.rate_limiter.record_success(client_ip)
+            return self.daemons[channel_id], ""
+
+        # New channel: validate token strength before creating
+        if not allow_create:
+            self.rate_limiter.record_failure(client_ip)
+            return None, "channel does not exist"
+
+        valid, err = _validate_token_strength(token)
+        if not valid:
+            self.rate_limiter.record_failure(client_ip)
+            return None, f"token rejected: {err}"
+
+        # Create new channel
+        with self.lock:
+            # Double-check (another thread might have created it)
+            if channel_id in self.daemons:
+                self.rate_limiter.record_success(client_ip)
+                return self.daemons[channel_id], ""
+
+            try:
+                channel_dir.mkdir(parents=True, exist_ok=True)
+                daemon = Daemon(channel_dir, verbose=self.verbose)
+                # Initialize
+                (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
+                daemon.index.sessions_known.add("DIRECTOR")
+                daemon.scan_once()
+                daemon._render_to_cache()
+                self.daemons[channel_id] = daemon
+
+                if self.verbose:
+                    print(f"[channel-mgr] created channel {channel_id[:8]}... (token validated)", file=sys.stderr)
+
+                self.rate_limiter.record_success(client_ip)
+                return daemon, ""
+
+            except Exception as e:
+                self.rate_limiter.record_failure(client_ip)
+                return None, f"failed to create channel: {e}"
+
+    def poll_all(self):
+        """Poll all active channels for new events."""
+        with self.lock:
+            for channel_id, daemon in list(self.daemons.items()):
+                try:
+                    changed = daemon.scan_once()
+                    if changed:
+                        daemon._render_to_cache()
+                        # Also write to filesystem for local readers
+                        sessions = set(daemon.index.sessions_known) | {"DIRECTOR"}
+                        for s in sessions:
+                            content = daemon.view_cache.get(s, "")
+                            if content:
+                                write_view_atomic(daemon.view_dir / f"{s}.md", content)
+                except Exception as e:
+                    if self.verbose:
+                        print(f"[channel-mgr] error polling {channel_id[:8]}...: {e}", file=sys.stderr)
+
+
 # ---------- HTTP server ----------
 
 class MycoHTTPServer(ThreadingHTTPServer):
-    """HTTP server that holds a reference to the Daemon instance."""
+    """HTTP server that holds a reference to the Daemon or ChannelManager."""
 
-    def __init__(self, server_address, handler_class, daemon: Daemon):
-        self.daemon_ref = daemon  # avoid shadowing socketserver.BaseServer.daemon
-        self.auth_token = os.environ.get("MYCO_TOKEN", "")
+    def __init__(self, server_address, handler_class, daemon_or_manager):
+        # In multi-channel mode, daemon_or_manager is a ChannelManager
+        # In single-channel mode, it's a Daemon (backward compat)
+        self.daemon_ref = daemon_or_manager
+        self.multi_channel = isinstance(daemon_or_manager, ChannelManager)
+        self.auth_token = os.environ.get("MYCO_TOKEN", "") if not self.multi_channel else ""
         super().__init__(server_address, handler_class)
 
 
 class MycoHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the myco daemon."""
 
-    def _check_auth(self) -> bool:
-        """Validate Bearer token if MYCO_TOKEN is configured. Returns True if ok."""
-        token = self.server.auth_token
-        if not token:
-            return True  # no auth configured
+    def _get_daemon(self) -> tuple[Daemon | None, str]:
+        """Get the daemon for this request.
+
+        In single-channel mode: returns the singleton daemon.
+        In multi-channel mode: authenticates token and returns the channel daemon.
+
+        Returns (daemon, error_message).
+        """
+        if not self.server.multi_channel:
+            # Single-channel mode: simple token check
+            token = self.server.auth_token
+            if not token:
+                return self.server.daemon_ref, ""  # no auth configured
+            auth = self.headers.get("Authorization", "")
+            if auth == f"Bearer {token}":
+                return self.server.daemon_ref, ""
+            return None, "unauthorized"
+
+        # Multi-channel mode: extract token and authenticate
         auth = self.headers.get("Authorization", "")
-        if auth == f"Bearer {token}":
-            return True
-        self._respond(401, json.dumps({"ok": False, "error": "unauthorized"}),
-                      content_type="application/json")
-        return False
+        if not auth.startswith("Bearer "):
+            return None, "missing or invalid Authorization header"
+
+        token = auth[7:]  # strip "Bearer "
+        client_ip = self.client_address[0]
+
+        manager = self.server.daemon_ref
+        daemon, err = manager.authenticate(token, client_ip, allow_create=True)
+        return daemon, err
 
     def do_GET(self):
         if self.path == "/healthz":
             # Health check — no auth required
-            daemon = self.server.daemon_ref
-            uptime = time.time() - daemon.start_time
-            body = json.dumps({
-                "ok": True,
-                "uptime_s": round(uptime, 1),
-                "sessions": len(daemon.index.sessions_known),
-            })
+            if self.server.multi_channel:
+                manager = self.server.daemon_ref
+                body = json.dumps({
+                    "ok": True,
+                    "mode": "multi-channel",
+                    "channels": len(manager.daemons),
+                })
+            else:
+                daemon = self.server.daemon_ref
+                uptime = time.time() - daemon.start_time
+                body = json.dumps({
+                    "ok": True,
+                    "mode": "single-channel",
+                    "uptime_s": round(uptime, 1),
+                    "sessions": len(daemon.index.sessions_known),
+                })
             self._respond(200, body, content_type="application/json")
             return
-        if not self._check_auth():
+
+        # All other endpoints require auth
+        daemon, err = self._get_daemon()
+        if daemon is None:
+            self._respond(401, json.dumps({"ok": False, "error": err}),
+                          content_type="application/json")
             return
+
         if self.path.startswith("/view/"):
             session = self.path[6:].strip("/").upper()
-            daemon = self.server.daemon_ref
             with daemon.lock:
                 view = daemon.view_cache.get(session, "")
             self._respond(200, view, content_type="text/markdown; charset=utf-8")
@@ -903,7 +1192,7 @@ class MycoHandler(BaseHTTPRequestHandler):
             if not filename or "/" in filename or ".." in filename:
                 self._respond(400, "invalid filename")
                 return
-            msg_file = self.server.daemon_ref.swarm_dir / "msg" / filename
+            msg_file = daemon.swarm_dir / "msg" / filename
             if not msg_file.exists():
                 self._respond(404, "not found")
                 return
@@ -916,23 +1205,26 @@ class MycoHandler(BaseHTTPRequestHandler):
             reader = qs.get("session", [None])[0]
             if reader:
                 msg_id = f"msg/{filename}"
-                daemon = self.server.daemon_ref
                 with daemon.lock:
                     daemon.index.msg_acks[msg_id].add(reader.upper())
                     daemon.index.answered_specs.add(msg_id)
                     daemon._render_to_cache()
             self._respond(200, content, content_type="text/markdown; charset=utf-8")
         elif self.path == "/status":
-            daemon = self.server.daemon_ref
             with daemon.lock:
-                status = self._build_status()
+                status = self._build_status(daemon)
             self._respond(200, json.dumps(status), content_type="application/json")
         else:
             self._respond(404, "not found")
 
     def do_POST(self):
-        if not self._check_auth():
+        # All POST endpoints require auth
+        daemon, err = self._get_daemon()
+        if daemon is None:
+            self._respond(401, json.dumps({"ok": False, "error": err}),
+                          content_type="application/json")
             return
+
         if self.path == "/events":
             body = self._read_body()
             try:
@@ -947,7 +1239,7 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(400, json.dumps({"ok": False, "error": "missing session or events"}),
                               content_type="application/json")
                 return
-            self.server.daemon_ref.ingest_events(session, events)
+            daemon.ingest_events(session, events)
             self._respond(200, json.dumps({"ok": True, "count": len(events)}),
                           content_type="application/json")
         elif self.path.startswith("/msg/"):
@@ -962,7 +1254,7 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(413, json.dumps({"ok": False, "error": f"payload exceeds {MSG_MAX_BYTES} bytes"}),
                               content_type="application/json")
                 return
-            msg_dir = self.server.daemon_ref.swarm_dir / "msg"
+            msg_dir = daemon.swarm_dir / "msg"
             msg_dir.mkdir(parents=True, exist_ok=True)
             msg_file = msg_dir / filename
             # S2 fix: reject overwrite of existing msg
@@ -987,7 +1279,7 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(400, json.dumps({"ok": False, "error": "missing prompt"}),
                               content_type="application/json")
                 return
-            dispatch_dir = self.server.daemon_ref.swarm_dir / "dispatch"
+            dispatch_dir = daemon.swarm_dir / "dispatch"
             dispatch_dir.mkdir(parents=True, exist_ok=True)
             dispatch_file = dispatch_dir / f"{session}.prompt"
             dispatch_file.write_text(prompt)
@@ -1008,8 +1300,7 @@ class MycoHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def _build_status(self) -> dict:
-        daemon = self.server.daemon_ref
+    def _build_status(self, daemon: Daemon) -> dict:
         sessions = {}
         for s in sorted(daemon.index.sessions_known):
             sessions[s] = {
@@ -1021,15 +1312,21 @@ class MycoHandler(BaseHTTPRequestHandler):
         return {"sessions": sessions}
 
     def log_message(self, format, *args):
-        if self.server.daemon_ref.verbose:
+        verbose = False
+        if self.server.multi_channel:
+            verbose = self.server.daemon_ref.verbose
+        else:
+            verbose = self.server.daemon_ref.verbose
+        if verbose:
             sys.stderr.write(f"[mycod-http] {format % args}\n")
 
 
 def main():
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
+    multi_channel = "--multi-channel" in sys.argv
     port = 0
     args_raw = sys.argv[1:]
-    # Parse --port
+    # Parse args
     filtered = []
     i = 0
     while i < len(args_raw):
@@ -1041,14 +1338,40 @@ def main():
             i += 1
         elif args_raw[i] in ("-q", "--quiet"):
             i += 1
+        elif args_raw[i] == "--multi-channel":
+            i += 1
         else:
             filtered.append(args_raw[i])
             i += 1
     if not filtered:
-        print("usage: mycod.py [-q|--quiet] [--port PORT] <swarm_dir>", file=sys.stderr)
+        print("usage: mycod.py [-q|--quiet] [--port PORT] [--multi-channel] <swarm_dir>", file=sys.stderr)
         sys.exit(2)
+
     swarm_dir = Path(filtered[0]).resolve()
-    Daemon(swarm_dir, verbose=not quiet).run(port=port)
+    verbose = not quiet
+
+    if multi_channel:
+        # Multi-channel mode: requires HTTP server
+        if port == 0:
+            port = 8000  # default port for multi-channel
+        manager = ChannelManager(swarm_dir, verbose=verbose)
+        server = MycoHTTPServer(("", port), MycoHandler, manager)
+        print(f"[mycod] multi-channel mode", file=sys.stderr)
+        print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
+        print(f"[mycod] channels dir: {manager.channels_dir}", file=sys.stderr)
+        print(f"[mycod] token requirements: min {MIN_TOKEN_LENGTH} chars, min {MIN_TOKEN_ENTROPY_BITS} bits entropy", file=sys.stderr)
+        # Poll loop
+        try:
+            http_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            http_thread.start()
+            while True:
+                manager.poll_all()
+                time.sleep(0.001)  # 1ms
+        except KeyboardInterrupt:
+            server.shutdown()
+    else:
+        # Single-channel mode (backward compat)
+        Daemon(swarm_dir, verbose=verbose).run(port=port)
 
 
 if __name__ == "__main__":
