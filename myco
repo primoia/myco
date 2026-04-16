@@ -3,17 +3,20 @@
 # myco — launch a Claude Code session connected to a myco swarm
 #
 # Usage:
-#   myco <SESSION> [project_dir] [--channel TOKEN] [--resume] [-- claude_flags...]
+#   myco <SESSION> [project_dir] [--daemon URL] [--channel TOKEN] [--resume] [-- claude_flags...]
 #
 # Examples:
-#   myco FRONT                                    # session FRONT in current dir
-#   myco FRONT ~/primoia                          # session FRONT in ~/primoia
-#   myco FRONT ~/primoia --channel myco-abc123... # with explicit channel token
-#   myco FRONT ~/primoia --resume                 # resume last session
-#   myco FRONT . -- --model sonnet                # pass flags to claude
+#   myco FRONT                                                    # session FRONT in current dir
+#   myco FRONT ~/primoia                                          # session FRONT in ~/primoia
+#   myco FRONT ~/primoia --channel myco-abc123...                 # with explicit channel token
+#   myco FRONT ~/primoia --daemon http://10.0.1.5:8000            # connect to remote daemon
+#   myco FRONT ~/primoia --daemon http://10.0.1.5:8000 \
+#                        --channel myco-abc123...                 # remote daemon + channel
+#   myco FRONT ~/primoia --resume                                 # resume last session
+#   myco FRONT . -- --model sonnet                                # pass flags to claude
 #
 # Environment (optional, has defaults):
-#   MYCO_URL    — daemon URL (default: http://localhost:8000)
+#   MYCO_URL    — daemon URL (default: http://localhost:8000, can be set via --daemon)
 #   MYCO_TOKEN  — auth token (default: none, can be set via --channel)
 #
 set -euo pipefail
@@ -21,7 +24,7 @@ set -euo pipefail
 MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ $# -lt 1 ]; then
-    echo "usage: myco <SESSION> [project_dir] [--channel TOKEN] [--resume] [-- claude_flags...]" >&2
+    echo "usage: myco <SESSION> [project_dir] [--daemon URL] [--channel TOKEN] [--resume] [-- claude_flags...]" >&2
     exit 2
 fi
 
@@ -33,9 +36,18 @@ PROJECT_DIR="."
 CLAUDE_ARGS=()
 RESUME=false
 CHANNEL_TOKEN=""
+DAEMON_URL=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --daemon)
+            if [ $# -lt 2 ]; then
+                echo "error: --daemon requires a URL argument" >&2
+                exit 2
+            fi
+            DAEMON_URL="$2"
+            shift 2
+            ;;
         --channel)
             if [ $# -lt 2 ]; then
                 echo "error: --channel requires a token argument" >&2
@@ -108,7 +120,13 @@ fi
 # --- Export env vars and launch ---
 export MYCO_SESSION="$SESSION"
 export MYCO_INJECT_VIEW=1
-export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
+
+# Set daemon URL from --daemon flag, then env, then default
+if [ -n "$DAEMON_URL" ]; then
+    export MYCO_URL="$DAEMON_URL"
+else
+    export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
+fi
 
 # Set token from --channel flag or inherit from environment
 if [ -n "$CHANNEL_TOKEN" ]; then
