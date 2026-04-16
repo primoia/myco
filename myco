@@ -3,24 +3,25 @@
 # myco — launch a Claude Code session connected to a myco swarm
 #
 # Usage:
-#   myco <SESSION> [project_dir] [-- claude_flags...]
+#   myco <SESSION> [project_dir] [--channel TOKEN] [--resume] [-- claude_flags...]
 #
 # Examples:
-#   myco FRONT                        # session FRONT in current dir
-#   myco FRONT ~/primoia              # session FRONT in ~/primoia
-#   myco FRONT ~/primoia --resume     # resume last session
-#   myco FRONT . -- --model sonnet    # pass flags to claude
+#   myco FRONT                                    # session FRONT in current dir
+#   myco FRONT ~/primoia                          # session FRONT in ~/primoia
+#   myco FRONT ~/primoia --channel myco-abc123... # with explicit channel token
+#   myco FRONT ~/primoia --resume                 # resume last session
+#   myco FRONT . -- --model sonnet                # pass flags to claude
 #
 # Environment (optional, has defaults):
 #   MYCO_URL    — daemon URL (default: http://localhost:8000)
-#   MYCO_TOKEN  — auth token (default: none)
+#   MYCO_TOKEN  — auth token (default: none, can be set via --channel)
 #
 set -euo pipefail
 
 MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ $# -lt 1 ]; then
-    echo "usage: myco <SESSION> [project_dir] [--resume] [-- claude_flags...]" >&2
+    echo "usage: myco <SESSION> [project_dir] [--channel TOKEN] [--resume] [-- claude_flags...]" >&2
     exit 2
 fi
 
@@ -31,9 +32,18 @@ shift
 PROJECT_DIR="."
 CLAUDE_ARGS=()
 RESUME=false
+CHANNEL_TOKEN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --channel)
+            if [ $# -lt 2 ]; then
+                echo "error: --channel requires a token argument" >&2
+                exit 2
+            fi
+            CHANNEL_TOKEN="$2"
+            shift 2
+            ;;
         --resume)
             RESUME=true
             shift
@@ -99,10 +109,18 @@ fi
 export MYCO_SESSION="$SESSION"
 export MYCO_INJECT_VIEW=1
 export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
-# MYCO_TOKEN inherited from environment if set
+
+# Set token from --channel flag or inherit from environment
+if [ -n "$CHANNEL_TOKEN" ]; then
+    export MYCO_TOKEN="$CHANNEL_TOKEN"
+fi
+# Otherwise MYCO_TOKEN inherited from environment if set
 
 echo "[myco] session=$SESSION project=$PROJECT_DIR"
 echo "[myco] daemon=$MYCO_URL"
+if [ -n "${MYCO_TOKEN:-}" ]; then
+    echo "[myco] channel token configured (${#MYCO_TOKEN} chars)"
+fi
 
 if [ "$RESUME" = true ]; then
     CLAUDE_ARGS=("--resume" "${CLAUDE_ARGS[@]}")
