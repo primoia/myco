@@ -154,11 +154,14 @@ def parse_block(block_text: str) -> list:
 
 
 def session_name(payload: dict) -> str:
+    # Session names are uppercase throughout the protocol. Normalize at
+    # the hook boundary so the event log, the daemon index, and view
+    # filters all agree regardless of what was typed in the launcher.
     name = os.environ.get("MYCO_SESSION")
     if name:
-        return name
+        return name.upper()
     cwd = payload.get("cwd") or os.getcwd()
-    return Path(cwd).name or "default"
+    return (Path(cwd).name or "default").upper()
 
 
 def swarm_dir() -> Path:
@@ -237,7 +240,13 @@ def main() -> int:
         return 0
 
     session = session_name(payload)
-    if not post_events_http(session, events):
+    if os.environ.get("MYCO_URL"):
+        # Daemon is authoritative. If POST fails, drop the events on the
+        # floor rather than silently writing them to a local swarm dir
+        # the daemon doesn't know about.
+        if not post_events_http(session, events):
+            debug(f"HTTP POST failed and MYCO_URL is set; {len(events)} event(s) dropped")
+    else:
         append_events_fs(session, events)
     return 0
 

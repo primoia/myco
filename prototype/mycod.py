@@ -17,10 +17,12 @@ The swarm directory must contain:
 
 Protocol v1. See docs/PROTOCOL.md for the event format.
 
-Multi-channel support (v1.4):
-    If MYCO_TOKEN is configured, the daemon operates in multi-channel mode.
-    Each unique token creates an isolated channel (identified by SHA256 hash).
-    Channels are completely isolated - no cross-channel visibility.
+Channel model (v1.5):
+    Every request is authenticated by a Bearer token. The token's SHA256
+    hash identifies the channel. Channels are completely isolated — no
+    cross-channel visibility. Requests without a valid token are rejected.
+    A session is auto-registered on the first GET /view/<session>, so
+    consumers can read their view without needing to publish first.
 """
 
 import hashlib
@@ -165,6 +167,11 @@ def _sanitize_msg(content: str) -> str:
 _KNOWN_KV_KEYS = {"ref", "spec", "ack", "addr", "result", "re"}
 _KV_RE = re.compile(r'\b([a-z]+):(\S+)')
 
+# Verbs whose obj field is another session identifier (not a resource or
+# task name). The obj gets upper-cased so `ask Worker ...` and
+# `ask WORKER ...` cannot become two distinct pending questions.
+_SESSION_TARGET_VERBS = {"ask", "reply", "direct"}
+
 
 def parse_detail_kvs(detail: str):
     """Extract key:value pairs from a detail string.
@@ -208,6 +215,13 @@ def parse_event(session: str, line: str):
     obj = parts[3] if len(parts) > 3 else ""
     detail = parts[4] if len(parts) > 4 else ""
     detail_text, kvs = parse_detail_kvs(detail)
+    # Session names are case-insensitive at the protocol level. The single
+    # invariant maintained by the index is "every session id is uppercase",
+    # so we normalize here — both the emitter and, for session-target
+    # verbs, the obj field.
+    session = session.upper()
+    if verb in _SESSION_TARGET_VERBS:
+        obj = obj.upper()
     return {
         "ts": ts,
         "session": session,
@@ -523,6 +537,10 @@ def _age_label(ts_str: str) -> str:
 
 def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
                 session_dirs: dict = None) -> str:
+    # Defensive normalization: every other path normalizes to upper, but
+    # this entrypoint is public and some callers (myco_view CLI) pass
+    # user input directly.
+    session = session.upper()
     blockers = index.blockers_for(session)
     dependents = index.dependents_of(session)
     resources = dict(index.resources)
@@ -582,9 +600,12 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
     lines.append("")
 
     lines.append("## DIRETIVAS")
+    # Directive target "ALL" is the broadcast marker (uppercased by
+    # parse_event like any session name); session-specific targets match
+    # uppercased session ids.
     relevant_directives = [
         (ts, t, txt) for ts, t, txt in directives
-        if t in ("all", session)
+        if t in ("ALL", session)
     ]
     if relevant_directives:
         for ts, target, text in relevant_directives[-5:]:
@@ -905,63 +926,8 @@ class Daemon:
 
         return changed
 
-    def run(self, port: int = 0):
-        # Initial setup: ensure DIRECTOR exists, replay logs, render
-        (self.log_dir / "DIRECTOR.log").touch(exist_ok=True)
-        self.index.sessions_known.add("DIRECTOR")
-        self.scan_once()
-        self.render_all()
-
-        if port:
-            self._run_http(port)
-        else:
-            self._run_poll()
-
-    def _run_http(self, port: int):
-        server = MycoHTTPServer(("", port), MycoHandler, self)
-        print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
-        print(f"[mycod] swarm dir: {self.swarm_dir}", file=sys.stderr)
-        # Run HTTP server in a background thread so we can poll logs too
-        http_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        http_thread.start()
-        print(f"[mycod] polling {self.log_dir} (hybrid mode: HTTP + filesystem)", file=sys.stderr)
-        try:
-            while True:
-                changed = False
-                with self.lock:
-                    changed = self.scan_once()
-                    if changed:
-                        self._render_to_cache()
-                        # Also write to filesystem for local readers
-                        sessions = set(self.index.sessions_known) | {"DIRECTOR"}
-                        for s in sessions:
-                            content = self.view_cache.get(s, "")
-                            if content:
-                                write_view_atomic(self.view_dir / f"{s}.md", content)
-                        if self.verbose:
-                            now = time.strftime("%H:%M:%S")
-                            slist = sorted(self.index.sessions_known)
-                            print(f"[mycod {now}] rendered {len(slist)} views ({', '.join(slist)})", file=sys.stderr)
-                time.sleep(self.POLL_INTERVAL_SEC)
-        except KeyboardInterrupt:
-            server.shutdown()
-
-    def _run_poll(self):
-        print(f"[mycod] watching {self.log_dir}", file=sys.stderr)
-        print(f"[mycod] writing to {self.view_dir}", file=sys.stderr)
-        print(f"[mycod] poll interval: {self.POLL_INTERVAL_SEC*1000:.1f}ms", file=sys.stderr)
-
-        try:
-            while True:
-                if self.scan_once():
-                    self.render_all()
-                    if self.verbose:
-                        now = time.strftime("%H:%M:%S")
-                        sessions = sorted(self.index.sessions_known)
-                        print(f"[mycod {now}] rendered {len(sessions)} views ({', '.join(sessions)})", file=sys.stderr)
-                time.sleep(self.POLL_INTERVAL_SEC)
-        except KeyboardInterrupt:
-            pass
+    # Daemon is always driven by ChannelManager.poll_all() now; it does
+    # not run standalone.
 
 
 
@@ -1108,14 +1074,16 @@ class ChannelManager:
 # ---------- HTTP server ----------
 
 class MycoHTTPServer(ThreadingHTTPServer):
-    """HTTP server that holds a reference to the Daemon or ChannelManager."""
+    """HTTP server backed by a ChannelManager.
 
-    def __init__(self, server_address, handler_class, daemon_or_manager):
-        # In multi-channel mode, daemon_or_manager is a ChannelManager
-        # In single-channel mode, it's a Daemon (backward compat)
-        self.daemon_ref = daemon_or_manager
-        self.multi_channel = isinstance(daemon_or_manager, ChannelManager)
-        self.auth_token = os.environ.get("MYCO_TOKEN", "") if not self.multi_channel else ""
+    Every request is authenticated by a Bearer token whose SHA256 is the
+    channel identifier. There is no notion of a shared default channel.
+    """
+
+    def __init__(self, server_address, handler_class, manager):
+        if not isinstance(manager, ChannelManager):
+            raise TypeError("MycoHTTPServer requires a ChannelManager backend")
+        self.manager = manager
         super().__init__(server_address, handler_class)
 
 
@@ -1123,54 +1091,31 @@ class MycoHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the myco daemon."""
 
     def _get_daemon(self) -> tuple[Daemon | None, str]:
-        """Get the daemon for this request.
+        """Authenticate the request and return the channel daemon.
 
-        In single-channel mode: returns the singleton daemon.
-        In multi-channel mode: authenticates token and returns the channel daemon.
+        Every request must present `Authorization: Bearer <token>`. The
+        token's SHA256 picks the channel; a new channel is created on
+        demand if the token passes the strength check.
 
-        Returns (daemon, error_message).
+        Returns (daemon, error_message). `daemon` is None on failure.
         """
-        if not self.server.multi_channel:
-            # Single-channel mode: simple token check
-            token = self.server.auth_token
-            if not token:
-                return self.server.daemon_ref, ""  # no auth configured
-            auth = self.headers.get("Authorization", "")
-            if auth == f"Bearer {token}":
-                return self.server.daemon_ref, ""
-            return None, "unauthorized"
-
-        # Multi-channel mode: extract token and authenticate
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             return None, "missing or invalid Authorization header"
 
         token = auth[7:]  # strip "Bearer "
         client_ip = self.client_address[0]
-
-        manager = self.server.daemon_ref
-        daemon, err = manager.authenticate(token, client_ip, allow_create=True)
-        return daemon, err
+        return self.server.manager.authenticate(token, client_ip, allow_create=True)
 
     def do_GET(self):
         if self.path == "/healthz":
             # Health check — no auth required
-            if self.server.multi_channel:
-                manager = self.server.daemon_ref
-                body = json.dumps({
-                    "ok": True,
-                    "mode": "multi-channel",
-                    "channels": len(manager.daemons),
-                })
-            else:
-                daemon = self.server.daemon_ref
-                uptime = time.time() - daemon.start_time
-                body = json.dumps({
-                    "ok": True,
-                    "mode": "single-channel",
-                    "uptime_s": round(uptime, 1),
-                    "sessions": len(daemon.index.sessions_known),
-                })
+            manager = self.server.manager
+            body = json.dumps({
+                "ok": True,
+                "mode": "multi-channel",
+                "channels": len(manager.daemons),
+            })
             self._respond(200, body, content_type="application/json")
             return
 
@@ -1184,6 +1129,16 @@ class MycoHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/view/"):
             session = self.path[6:].strip("/").upper()
             with daemon.lock:
+                if session not in daemon.index.sessions_known:
+                    # Auto-register: a session exists as soon as it asks for
+                    # its own view. Touch the log file so scan_once picks up
+                    # future writes with correct offsets.
+                    daemon.index.sessions_known.add(session)
+                    log_file = daemon.log_dir / f"{session}.log"
+                    log_file.touch(exist_ok=True)
+                    daemon.offsets.setdefault(session, 0)
+                    daemon.buffers.setdefault(session, "")
+                    daemon._render_to_cache()
                 view = daemon.view_cache.get(session, "")
             self._respond(200, view, content_type="text/markdown; charset=utf-8")
         elif self.path.startswith("/msg/"):
@@ -1312,21 +1267,14 @@ class MycoHandler(BaseHTTPRequestHandler):
         return {"sessions": sessions}
 
     def log_message(self, format, *args):
-        verbose = False
-        if self.server.multi_channel:
-            verbose = self.server.daemon_ref.verbose
-        else:
-            verbose = self.server.daemon_ref.verbose
-        if verbose:
+        if self.server.manager.verbose:
             sys.stderr.write(f"[mycod-http] {format % args}\n")
 
 
 def main():
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
-    multi_channel = "--multi-channel" in sys.argv
     port = 0
     args_raw = sys.argv[1:]
-    # Parse args
     filtered = []
     i = 0
     while i < len(args_raw):
@@ -1339,39 +1287,34 @@ def main():
         elif args_raw[i] in ("-q", "--quiet"):
             i += 1
         elif args_raw[i] == "--multi-channel":
+            # Accepted for backward compatibility; the daemon is always
+            # multi-channel now and this flag is a no-op.
             i += 1
         else:
             filtered.append(args_raw[i])
             i += 1
     if not filtered:
-        print("usage: mycod.py [-q|--quiet] [--port PORT] [--multi-channel] <swarm_dir>", file=sys.stderr)
+        print("usage: mycod.py [-q|--quiet] [--port PORT] <swarm_dir>", file=sys.stderr)
         sys.exit(2)
 
     swarm_dir = Path(filtered[0]).resolve()
     verbose = not quiet
+    if port == 0:
+        port = 8000
 
-    if multi_channel:
-        # Multi-channel mode: requires HTTP server
-        if port == 0:
-            port = 8000  # default port for multi-channel
-        manager = ChannelManager(swarm_dir, verbose=verbose)
-        server = MycoHTTPServer(("", port), MycoHandler, manager)
-        print(f"[mycod] multi-channel mode", file=sys.stderr)
-        print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
-        print(f"[mycod] channels dir: {manager.channels_dir}", file=sys.stderr)
-        print(f"[mycod] token requirements: min {MIN_TOKEN_LENGTH} chars, min {MIN_TOKEN_ENTROPY_BITS} bits entropy", file=sys.stderr)
-        # Poll loop
-        try:
-            http_thread = threading.Thread(target=server.serve_forever, daemon=True)
-            http_thread.start()
-            while True:
-                manager.poll_all()
-                time.sleep(0.001)  # 1ms
-        except KeyboardInterrupt:
-            server.shutdown()
-    else:
-        # Single-channel mode (backward compat)
-        Daemon(swarm_dir, verbose=verbose).run(port=port)
+    manager = ChannelManager(swarm_dir, verbose=verbose)
+    server = MycoHTTPServer(("", port), MycoHandler, manager)
+    print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
+    print(f"[mycod] channels dir: {manager.channels_dir}", file=sys.stderr)
+    print(f"[mycod] token requirements: min {MIN_TOKEN_LENGTH} chars, min {MIN_TOKEN_ENTROPY_BITS} bits entropy", file=sys.stderr)
+    try:
+        http_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        http_thread.start()
+        while True:
+            manager.poll_all()
+            time.sleep(0.001)
+    except KeyboardInterrupt:
+        server.shutdown()
 
 
 if __name__ == "__main__":

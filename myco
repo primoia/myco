@@ -28,7 +28,10 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 
-SESSION="$1"
+# Session names are always uppercase in the protocol. Normalize here so
+# the user doesn't have to remember the convention, and so `myco Worker`
+# and `myco WORKER` can't create two distinct sessions.
+SESSION="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
 shift
 
 # Parse optional project_dir and flags

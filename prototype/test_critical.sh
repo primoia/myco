@@ -73,47 +73,49 @@ kill $DAEMON_PID 2>/dev/null
 wait $DAEMON_PID 2>/dev/null || true
 
 # ==========================================
-# Teste 2: Backward Compatibility
+# Teste 2: Token obrigatório
 # ==========================================
 echo
-echo "Teste 2: Backward compatibility (single-channel)"
+echo "Teste 2: Requisições sem token são rejeitadas (401)"
 echo "------------------------------------------"
 
 cleanup
-SWARM_SINGLE="/tmp/myco-test-single"
-rm -rf "$SWARM_SINGLE"
-
-# Rodar em modo single-channel (SEM --multi-channel)
-python3 mycod.py --port $PORT "$SWARM_SINGLE" > /dev/null 2>&1 &
+python3 mycod.py --port $PORT "$SWARM_DIR" > /dev/null 2>&1 &
 DAEMON_PID=$!
 sleep 2
 
-# Criar evento sem token
-curl -s -X POST \
-    -H "Content-Type: application/json" \
-    -d '{"session":"TEST","events":["start single-mode"]}' \
-    http://localhost:$PORT/events > /dev/null
-
-# Verificar healthz
-MODE=$(curl -s http://localhost:$PORT/healthz | python3 -c "import json,sys; print(json.load(sys.stdin).get('mode', 'single-channel'))")
-if [ "$MODE" = "single-channel" ]; then
-    echo "  ✓ Modo single-channel funciona"
+# healthz não requer auth
+MODE=$(curl -s http://localhost:$PORT/healthz | python3 -c "import json,sys; print(json.load(sys.stdin).get('mode'))")
+if [ "$MODE" = "multi-channel" ]; then
+    echo "  ✓ /healthz responde sem auth e reporta multi-channel"
 else
-    echo "  ✗ FALHA: Modo deveria ser single-channel, obteve: $MODE"
+    echo "  ✗ FALHA: /healthz modo inesperado: $MODE"
     exit 1
 fi
 
-# Verificar estrutura (não deve ter channels/)
-if [ ! -d "$SWARM_SINGLE/channels" ]; then
-    echo "  ✓ Estrutura single-channel correta (sem channels/)"
+# POST /events sem Authorization → 401
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"session":"TEST","events":["start unauth"]}' \
+    http://localhost:$PORT/events)
+if [ "$HTTP_CODE" -eq 401 ]; then
+    echo "  ✓ POST /events sem token retorna 401"
 else
-    echo "  ✗ FALHA: Modo single criou channels/ indevidamente"
+    echo "  ✗ FALHA: Esperava 401, obteve $HTTP_CODE"
+    exit 1
+fi
+
+# GET /view/X sem token → 401
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/view/ANY)
+if [ "$HTTP_CODE" -eq 401 ]; then
+    echo "  ✓ GET /view/ sem token retorna 401"
+else
+    echo "  ✗ FALHA: Esperava 401, obteve $HTTP_CODE"
     exit 1
 fi
 
 kill $DAEMON_PID 2>/dev/null
 wait $DAEMON_PID 2>/dev/null || true
-rm -rf "$SWARM_SINGLE"
 
 # ==========================================
 # Teste 3: Isolamento de Mensagens
