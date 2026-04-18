@@ -1,8 +1,8 @@
-# Multi-Channel Mode (myco v1.4)
+# Multi-Tenant Mode (myco v1.6)
 
 ## Visão Geral
 
-O modo multi-canal permite rodar múltiplos swarms isolados em um único daemon. Cada token único cria e acessa um "canal" completamente isolado dos demais.
+O daemon é sempre multi-tenant: cada token único cria e acessa um "tenant" completamente isolado dos demais. Toda requisição (exceto `/healthz`) exige `Authorization: Bearer <token>`.
 
 **Casos de uso:**
 - Múltiplos times trabalhando independentemente
@@ -10,11 +10,13 @@ O modo multi-canal permite rodar múltiplos swarms isolados em um único daemon.
 - Projetos diferentes na mesma infraestrutura
 - Isolamento de segurança por projeto
 
+**Nota sobre terminologia:** até v1.5 o conceito era chamado "multi-channel" / "channel". O termo mudou para **tenant** para evitar colisão com os **canais nomeados** (`channel:<nome>`) do protocolo, que são outro conceito (rótulo de visibilidade de evento *dentro* de um tenant). Flags e strings antigas (`--multi-channel`, `--channel TOKEN`, `mode: "multi-channel"`, pasta `channels/`) continuam aceitas como aliases e são migradas automaticamente.
+
 ## Arquitetura
 
 ```
 swarm_dir/
-  channels/
+  tenants/
     <sha256-do-token-alpha>/
       log/
       view/
@@ -25,10 +27,10 @@ swarm_dir/
       msg/
 ```
 
-Cada canal é identificado pelo **SHA256 do token**, garantindo:
+Cada tenant é identificado pelo **SHA256 do token**, garantindo:
 - ✅ Tokens nunca são armazenados em plaintext
 - ✅ Impossível descobrir o token a partir do hash
-- ✅ Isolamento total entre canais
+- ✅ Isolamento total entre tenants
 
 ## Segurança
 
@@ -68,40 +70,41 @@ Após 5 falhas, o IP é temporariamente bloqueado:
 
 ### Isolamento Absoluto
 
-Canais **nunca** compartilham dados:
+Tenants **nunca** compartilham dados:
 - Logs separados
 - Views separadas
 - Mensagens separadas
 - Nenhuma visibilidade cruzada
 
-Um token **não pode** acessar dados de outro canal, mesmo conhecendo o hash.
+Um token **não pode** acessar dados de outro tenant, mesmo conhecendo o hash.
 
 ## Uso
 
 ### Iniciar Daemon
 
 ```bash
-python3 mycod.py --multi-channel --port 8000 /tmp/myco-swarm
+python3 mycod.py --port 8000 /tmp/myco-swarm
 ```
 
 Saída:
 ```
-[mycod] multi-channel mode
 [mycod] HTTP server on port 8000
-[mycod] channels dir: /tmp/myco-swarm/channels
+[mycod] tenants dir: /tmp/myco-swarm/tenants
 [mycod] token requirements: min 32 chars, min 80 bits entropy
 ```
 
+`--multi-tenant` (ou `--multi-channel`) são aceitos como no-ops — o daemon sempre opera nesse modo.
+
 ### Configurar Sessões
 
-**Time Alpha (canal isolado):**
+**Time Alpha (tenant isolado):**
 ```bash
 export MYCO_TOKEN="myco-alpha-team-secure-token-2026-$(uuidgen)"
 export MYCO_URL="http://localhost:8000"
 export MYCO_SESSION="FRONTEND"
 ```
 
-**Time Beta (canal completamente separado):**
+**Time Beta (tenant completamente separado):**
 ```bash
 export MYCO_TOKEN="myco-beta-team-secure-token-2026-$(uuidgen)"
 export MYCO_URL="http://localhost:8000"
@@ -120,10 +123,13 @@ Resposta:
 ```json
 {
   "ok": true,
-  "mode": "multi-channel",
+  "mode": "multi-tenant",
+  "tenants": 2,
   "channels": 2
 }
 ```
+
+(`channels` é um alias legado do mesmo valor, mantido para tooling que predata o rename.)
 
 ## Geração de Tokens Seguros
 
@@ -142,21 +148,9 @@ export MYCO_TOKEN="myco-$(openssl rand -hex 32)"
 export MYCO_TOKEN=$(python3 -c "import secrets; print('myco-' + secrets.token_urlsafe(32))")
 ```
 
-## Migração de Modo Single → Multi
+## Migração do layout on-disk (`channels/` → `tenants/`)
 
-**Antes (single-channel):**
-```bash
-python3 mycod.py /tmp/myco-swarm
-# Todos compartilham mesmo log/view/msg
-```
-
-**Depois (multi-channel):**
-```bash
-python3 mycod.py --multi-channel --port 8000 /tmp/myco-swarm-multi
-# Cada token = canal isolado
-```
-
-Não há migração automática. O modo multi-channel cria uma nova estrutura `channels/`.
+Se um daemon v1.6+ subir num diretório que ainda tem a pasta antiga `channels/` e não tem `tenants/`, ele renomeia automaticamente no startup. Idempotente, sem perda de dados. Tenants existentes (logs, views, msgs) permanecem intactos.
 
 ## Troubleshooting
 
@@ -169,19 +163,8 @@ Não há migração automática. O modo multi-channel cria uma nova estrutura `c
 ### "too many failed attempts, retry in XXs"
 **Solução:** Aguarde o cooldown (5 min) ou corrija o token.
 
-### Canal não aparece em /healthz
-**Solução:** O canal só é criado após a primeira requisição autenticada bem-sucedida.
-
-## Comparação: Single vs Multi
-
-| Aspecto | Single-Channel | Multi-Channel |
-|---|---|---|
-| Modo de operação | Um swarm global | N swarms isolados |
-| Autenticação | Token opcional único | Token obrigatório, múltiplos |
-| Isolamento | Todos veem tudo | Zero visibilidade cruzada |
-| Proteção brute-force | Não | Rate limiting por IP |
-| Validação de token | Simples comparação | Força mínima + entropia |
-| Uso de porta | Opcional | Obrigatória (HTTP) |
+### Tenant não aparece em /healthz
+**Solução:** O tenant só é criado após a primeira requisição autenticada bem-sucedida.
 
 ## Segurança: Checklist
 
@@ -189,22 +172,22 @@ Não há migração automática. O modo multi-channel cria uma nova estrutura `c
 - ✅ **Não compartilhe tokens** entre times/projetos
 - ✅ **Não comite tokens** em repositórios (use `.env`)
 - ✅ **Rode sobre TLS** em produção (nginx reverse proxy)
-- ✅ **Monitore /healthz** para detectar canais inesperados
-- ✅ **Limpe canais antigos** manualmente removendo `channels/<hash>/`
+- ✅ **Monitore /healthz** para detectar tenants inesperados
+- ✅ **Limpe tenants antigos** manualmente removendo `tenants/<hash>/`
 
 ## Exemplo Completo
 
 ```bash
 # Terminal 1: Daemon
-python3 mycod.py --multi-channel --port 8000 /tmp/swarm
+python3 mycod.py --port 8000 /tmp/swarm
 
-# Terminal 2: Time Frontend (canal Alpha)
+# Terminal 2: Time Frontend (tenant Alpha)
 export MYCO_TOKEN="myco-frontend-secure-$(uuidgen)-2026"
 export MYCO_URL="http://localhost:8000"
 export MYCO_SESSION="UI"
 # Trabalhe normalmente...
 
-# Terminal 3: Time Backend (canal Beta - isolado)
+# Terminal 3: Time Backend (tenant Beta - isolado)
 export MYCO_TOKEN="myco-backend-secure-$(uuidgen)-2026"
 export MYCO_URL="http://localhost:8000"
 export MYCO_SESSION="API"
@@ -212,7 +195,7 @@ export MYCO_SESSION="API"
 
 # Terminal 4: Verificar isolamento
 curl -H "Authorization: Bearer $MYCO_TOKEN" $MYCO_URL/view/UI
-# Cada token vê apenas seu próprio canal
+# Cada token vê apenas seu próprio tenant
 ```
 
 ## Referência de Endpoints
@@ -220,10 +203,10 @@ curl -H "Authorization: Bearer $MYCO_TOKEN" $MYCO_URL/view/UI
 Todos os endpoints (exceto `/healthz`) requerem `Authorization: Bearer <token>`.
 
 - `GET /healthz` — Status do daemon (sem auth)
-- `GET /view/<SESSION>` — View da sessão no canal do token
-- `POST /events` — Enviar eventos para o canal do token
-- `GET /msg/<FILE>` — Ler mensagem do canal do token
-- `POST /msg/<FILE>` — Criar mensagem no canal do token
-- `GET /status` — Status do canal do token
+- `GET /view/<SESSION>` — View da sessão no tenant do token (auto-registra a sessão)
+- `POST /events` — Enviar eventos para o tenant do token
+- `GET /msg/<FILE>` — Ler mensagem do tenant do token
+- `POST /msg/<FILE>` — Criar mensagem no tenant do token
+- `GET /status` — Status do tenant do token
 
-**Importante:** O token no header `Authorization` determina qual canal é acessado.
+**Importante:** O token no header `Authorization` determina qual tenant é acessado.

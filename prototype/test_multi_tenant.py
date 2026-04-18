@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test multi-channel isolation and security features."""
+"""Test multi-tenant isolation and security features."""
 
 import json
 import os
@@ -10,14 +10,14 @@ import requests
 from pathlib import Path
 
 # Test configuration
-SWARM_DIR = Path("/tmp/myco-test-multi-channel")
+SWARM_DIR = Path("/tmp/myco-test-multi-tenant")
 PORT = 9999
 BASE_URL = f"http://localhost:{PORT}"
 PROTOTYPE_DIR = Path(__file__).resolve().parent
 
 # Test tokens
-TOKEN_VALID_1 = "myco-test-channel-alpha-secure-token-abcdefghijklmnopqrstuvwxyz-1234567890"  # Good entropy
-TOKEN_VALID_2 = "myco-test-channel-beta-secure-token-zyxwvutsrqponmlkjihgfedcba-0987654321"  # Different valid token
+TOKEN_VALID_1 = "myco-test-tenant-alpha-secure-token-abcdefghijklmnopqrstuvwxyz-1234567890"  # Good entropy
+TOKEN_VALID_2 = "myco-test-tenant-beta-secure-token-zyxwvutsrqponmlkjihgfedcba-0987654321"  # Different valid token
 TOKEN_WEAK = "abc123"  # Too short
 TOKEN_LOW_ENTROPY = "a" * 64  # Low entropy (all same char)
 
@@ -28,10 +28,10 @@ def cleanup():
         shutil.rmtree(SWARM_DIR)
 
 def start_daemon():
-    """Start daemon in multi-channel mode."""
+    """Start daemon in multi-tenant mode."""
     SWARM_DIR.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
-        ["python3", "mycod.py", "--multi-channel", "--port", str(PORT), str(SWARM_DIR)],
+        ["python3", "mycod.py", "--port", str(PORT), str(SWARM_DIR)],
         cwd=str(PROTOTYPE_DIR),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -47,7 +47,7 @@ def test_healthz():
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
-    assert data["mode"] == "multi-channel"
+    assert data["mode"] == "multi-tenant"
     print("  ✓ Health check passed")
 
 def test_weak_token_rejection():
@@ -76,29 +76,29 @@ def test_weak_token_rejection():
     assert "weak" in data["error"] or "entropy" in data["error"]
     print("  ✓ Low entropy token rejected")
 
-def test_channel_isolation():
-    """Test that channels are completely isolated."""
-    print("\nTest 3: Channel isolation...")
+def test_tenant_isolation():
+    """Test that tenants are completely isolated."""
+    print("\nTest 3: Tenant isolation...")
 
-    # Create event in channel 1
+    # Create event in tenant 1
     resp = requests.post(
         f"{BASE_URL}/events",
         headers={"Authorization": f"Bearer {TOKEN_VALID_1}"},
         json={"session": "ALICE", "events": ["start secret-project"]},
     )
     assert resp.status_code == 200
-    print("  ✓ Event posted to channel 1")
+    print("  ✓ Event posted to tenant 1")
 
-    # Create event in channel 2
+    # Create event in tenant 2
     resp = requests.post(
         f"{BASE_URL}/events",
         headers={"Authorization": f"Bearer {TOKEN_VALID_2}"},
         json={"session": "BOB", "events": ["start different-project"]},
     )
     assert resp.status_code == 200
-    print("  ✓ Event posted to channel 2")
+    print("  ✓ Event posted to tenant 2")
 
-    # Read view from channel 1
+    # Read view from tenant 1
     resp = requests.get(
         f"{BASE_URL}/view/ALICE",
         headers={"Authorization": f"Bearer {TOKEN_VALID_1}"},
@@ -106,11 +106,11 @@ def test_channel_isolation():
     assert resp.status_code == 200
     view1 = resp.text
     assert "secret-project" in view1
-    assert "different-project" not in view1  # Should NOT see channel 2 data
+    assert "different-project" not in view1  # Should NOT see tenant 2 data
     assert "BOB" not in view1
-    print("  ✓ Channel 1 view isolated (sees only own data)")
+    print("  ✓ Tenant 1 view isolated (sees only own data)")
 
-    # Read view from channel 2
+    # Read view from tenant 2
     resp = requests.get(
         f"{BASE_URL}/view/BOB",
         headers={"Authorization": f"Bearer {TOKEN_VALID_2}"},
@@ -118,9 +118,9 @@ def test_channel_isolation():
     assert resp.status_code == 200
     view2 = resp.text
     assert "different-project" in view2
-    assert "secret-project" not in view2  # Should NOT see channel 1 data
+    assert "secret-project" not in view2  # Should NOT see tenant 1 data
     assert "ALICE" not in view2
-    print("  ✓ Channel 2 view isolated (sees only own data)")
+    print("  ✓ Tenant 2 view isolated (sees only own data)")
 
 def test_rate_limiting():
     """Test rate limiting against brute-force."""
@@ -144,10 +144,10 @@ def test_rate_limiting():
     print("  ✓ Rate limiting activated after 5 failures")
 
 def test_message_isolation():
-    """Test that messages are isolated between channels."""
+    """Test that messages are isolated between tenants."""
     print("\nTest 5: Message isolation...")
 
-    # Create message in channel 1
+    # Create message in tenant 1
     resp = requests.post(
         f"{BASE_URL}/msg/ALICE-001.md",
         headers={"Authorization": f"Bearer {TOKEN_VALID_1}"},
@@ -157,28 +157,28 @@ def test_message_isolation():
         print(f"  DEBUG: POST /msg/ failed with status {resp.status_code}")
         print(f"  DEBUG: Response: {resp.text}")
     assert resp.status_code == 200
-    print("  ✓ Message created in channel 1")
+    print("  ✓ Message created in tenant 1")
 
-    # Try to read from channel 2 (should fail or not exist)
+    # Try to read from tenant 2 (should fail or not exist)
     resp = requests.get(
         f"{BASE_URL}/msg/ALICE-001.md",
         headers={"Authorization": f"Bearer {TOKEN_VALID_2}"},
     )
-    assert resp.status_code == 404  # Different channel = different msg directory
-    print("  ✓ Message not accessible from channel 2")
+    assert resp.status_code == 404  # Different tenant = different msg directory
+    print("  ✓ Message not accessible from tenant 2")
 
-    # Read from channel 1 (should work)
+    # Read from tenant 1 (should work)
     resp = requests.get(
         f"{BASE_URL}/msg/ALICE-001.md?session=ALICE",
         headers={"Authorization": f"Bearer {TOKEN_VALID_1}"},
     )
     assert resp.status_code == 200
     assert "Secret message from Alice" in resp.text
-    print("  ✓ Message accessible from channel 1")
+    print("  ✓ Message accessible from tenant 1")
 
 def main():
     print("=" * 60)
-    print("Multi-channel security test suite")
+    print("Multi-tenant security test suite")
     print("=" * 60)
 
     cleanup()
@@ -186,12 +186,12 @@ def main():
 
     try:
         proc = start_daemon()
-        print("\n[Starting daemon in multi-channel mode...]")
+        print("\n[Starting daemon in multi-tenant mode...]")
         time.sleep(1)  # Give it time to start
 
         test_healthz()
         test_weak_token_rejection()
-        test_channel_isolation()
+        test_tenant_isolation()
         test_message_isolation()
         test_rate_limiting()  # Run last - bans localhost for 5 min
 

@@ -1808,8 +1808,8 @@ class TestHybridMode:
 class TestTokenAuth:
     """Auth is mandatory on every endpoint except /healthz.
 
-    The daemon is always multi-channel: the token's SHA256 picks the
-    channel. There is no shared default channel.
+    The daemon is always multi-tenant: the token's SHA256 picks the
+    tenant. There is no shared default tenant.
     """
 
     # A strong test token (>= 32 chars, > 80 bits entropy) so the
@@ -1836,8 +1836,9 @@ class TestTokenAuth:
                 body = json.loads(resp.read())
                 assert resp.status == 200
                 assert body["ok"] is True
-                assert body["mode"] == "multi-channel"
-                assert "channels" in body
+                assert body["mode"] == "multi-tenant"
+                assert "tenants" in body
+                assert "channels" in body  # legacy alias
         finally:
             server.shutdown()
 
@@ -1960,8 +1961,8 @@ class TestHealthz:
                 body = json.loads(resp.read())
                 assert resp.status == 200
                 assert body["ok"] is True
-                assert body["mode"] == "multi-channel"
-                assert body["channels"] >= 1  # test channel
+                assert body["mode"] == "multi-tenant"
+                assert body["tenants"] >= 1  # test tenant
         finally:
             server.shutdown()
 
