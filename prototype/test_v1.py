@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mycod import (
     parse_event, parse_detail_kvs, SwarmIndex, render_view,
-    write_view_atomic,
+    write_view_atomic, event_channels, GLOBAL_CHANNEL,
 )
 
 
@@ -2496,6 +2496,155 @@ class TestDedupeArtifacts:
         view = render_view(idx, "AUTH")
         assert "AUTH" in view
         assert "CART" in view
+
+
+# ============================================================
+# A1: named channels — visibility scoping via `channel:` kv
+# ============================================================
+
+class TestChannelFiltering:
+    def test_parse_channel_kv(self):
+        text, kvs = parse_detail_kvs("revise-diff channel:review-42 spec:msg/X.md")
+        assert kvs == {"channel": "review-42", "spec": "msg/X.md"}
+        assert text == "revise-diff"
+
+    def test_event_channels_default_global(self):
+        ev = parse_event("A", "T0 A start work")
+        assert event_channels(ev) == {GLOBAL_CHANNEL}
+
+    def test_event_channels_explicit(self):
+        ev = parse_event("A", "T0 A start work channel:review")
+        assert event_channels(ev) == {"review"}
+
+    def test_event_channels_multi(self):
+        ev = parse_event("A", "T0 A start work channel:a,b,c")
+        assert event_channels(ev) == {"a", "b", "c"}
+
+    def test_no_channel_is_global_visible_to_all(self):
+        idx = SwarmIndex()
+        ev = parse_event("A", "T0 A start deploy")
+        idx.apply(ev)
+        assert idx._is_visible(ev, "A")
+        assert idx._is_visible(ev, "B")
+        assert idx._is_visible(ev, "C")
+
+    def test_private_channel_isolates_from_bystander(self):
+        idx = SwarmIndex()
+        idx.sessions_known.update({"A", "B", "C"})
+        ask = parse_event("A", "T0 A ask B revise channel:review-42")
+        idx.apply(ask)
+        reply = parse_event("B", "T1 B reply A ok channel:review-42 re:msg/X.md")
+        idx.apply(reply)
+        # A and B are members (author and mention-target)
+        assert idx._is_visible(ask, "B")
+        assert idx._is_visible(reply, "A")
+        # C is bystander — sees nothing from review-42
+        assert not idx._is_visible(ask, "C")
+        assert not idx._is_visible(reply, "C")
+
+    def test_membership_is_sticky(self):
+        idx = SwarmIndex()
+        # A pulls B into review-42 via ask
+        idx.apply(parse_event("A", "T0 A ask B setup channel:review-42"))
+        # Later, A posts in review-42 without mentioning B — B is still a member
+        later = parse_event("A", "T2 A start hunt-bug channel:review-42")
+        idx.apply(later)
+        assert idx._is_visible(later, "B")
+        assert not idx._is_visible(later, "C")
+
+    def test_mention_pulls_target_in(self):
+        idx = SwarmIndex()
+        # NEW has never been seen; targeted ask in review-42 should still reach NEW
+        ev = parse_event("A", "T0 A ask NEW join channel:review-42")
+        idx.apply(ev)
+        assert "review-42" in idx.session_channels["NEW"]
+        assert idx._is_visible(ev, "NEW")
+
+    def test_multi_channel_event(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("X", "T0 X start setup channel:ops"))  # X joins ops
+        idx.apply(parse_event("Y", "T1 Y start audit channel:sec"))  # Y joins sec
+        ev = parse_event("A", "T2 A say outage-incoming channel:ops,sec")
+        idx.apply(ev)
+        assert idx._is_visible(ev, "X")  # member of ops
+        assert idx._is_visible(ev, "Y")  # member of sec
+        assert not idx._is_visible(ev, "Z")  # neither
+
+    def test_say_global_visible_to_all(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("A", "T0 A start work"))  # A exists
+        idx.apply(parse_event("B", "T1 B start work"))  # B exists
+        idx.apply(parse_event("A", "T2 A say deploying-now"))
+        view_b = render_view(idx, "B")
+        assert "deploying-now" in view_b
+
+    def test_say_scoped_hidden_from_non_members(self):
+        idx = SwarmIndex()
+        # B exists but is not in review-42
+        idx.apply(parse_event("B", "T0 B start work"))
+        idx.apply(parse_event("A", "T1 A start hunt channel:review-42"))
+        idx.apply(parse_event("A", "T2 A say found-it channel:review-42"))
+        view_b = render_view(idx, "B")
+        assert "found-it" not in view_b
+
+    def test_say_scoped_visible_to_member(self):
+        idx = SwarmIndex()
+        # M is pulled into review-42 via ask, then sees a say in that channel
+        idx.apply(parse_event("A", "T0 A ask M review channel:review-42"))
+        idx.apply(parse_event("A", "T1 A say found-it channel:review-42"))
+        view_m = render_view(idx, "M")
+        assert "found-it" in view_m
+
+    def test_render_hides_channel_event_from_bystander(self):
+        idx = SwarmIndex()
+        # C is a bystander who never touches review-42
+        idx.apply(parse_event("C", "T0 C start other-work"))
+        idx.apply(parse_event("A", "T1 A start hunt channel:review-42"))
+        idx.apply(parse_event("A", "T2 A ask B revise channel:review-42"))
+        view_c = render_view(idx, "C")
+        assert "review-42" not in view_c
+        assert "hunt" not in view_c
+
+    def test_log_rehydrates_membership_from_events(self):
+        """Membership is derived purely from applied events — a fresh index
+        rebuilt by replaying the same event stream must yield identical
+        visibility. Guards the daemon restart path."""
+        lines = [
+            "T0 A ask B revise channel:review-42",
+            "T1 B reply A ok channel:review-42 re:msg/X.md",
+            "T2 C start other-work",
+        ]
+        idx1 = SwarmIndex()
+        for ln in lines:
+            session = ln.split()[1]
+            idx1.apply(parse_event(session, ln))
+        idx2 = SwarmIndex()
+        for ln in lines:
+            session = ln.split()[1]
+            idx2.apply(parse_event(session, ln))
+        assert idx1.session_channels == idx2.session_channels
+        assert idx1.session_channels["A"] == {GLOBAL_CHANNEL, "review-42"}
+        assert idx1.session_channels["B"] == {GLOBAL_CHANNEL, "review-42"}
+        assert idx1.session_channels["C"] == {GLOBAL_CHANNEL}
+
+    def test_direct_mention_overrides_channel_scope(self):
+        """ask TARGET ... channel:X reaches TARGET even before TARGET is a member —
+        it's the act of being mentioned that enrolls them. Verified via _is_visible
+        directly to lock in the 'mention overrides scope' rule."""
+        idx = SwarmIndex()
+        ev = parse_event("A", "T0 A ask FRESH join channel:review-42")
+        # Visible to FRESH even though apply() hasn't run yet (direct mention rule).
+        assert idx._in_channel_scope(ev, "FRESH")
+
+    def test_legacy_behavior_preserved_when_no_channels_used(self):
+        """With zero channel: kvs anywhere, the swarm behaves exactly like before."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("A", "T0 A start api"))
+        idx.apply(parse_event("B", "T1 B need api"))
+        idx.apply(parse_event("A", "T2 A done api ref:v1"))
+        view_b = render_view(idx, "B")
+        assert "api" in view_b
+        assert "v1" in view_b
 
 
 if __name__ == "__main__":

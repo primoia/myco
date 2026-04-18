@@ -85,12 +85,31 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
 | `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
 | `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
+| `channel:` | canal(is) de visibilidade; padrão `global`; lista por vírgula | `channel:review-42` / `channel:sec,ops` |
 
 Exemplo completo:
 
 ```
 done auth-api-v2 result:ok ref:origin/feat/new-login spec:msg/AUTH-003.md
 reply FRONT resposta re:msg/FRONT-010.md spec:msg/DIRECTOR-005.md
+```
+
+## Canais de visibilidade (`channel:`)
+
+Por padrão todo evento é swarm-wide — aparece para qualquer sessão. Para isolar uma conversa (ex: code review, incidente, spike), qualquer evento pode carregar `channel:<nome>`. Sessões não pertencentes ao canal não veem o evento.
+
+**Membresia implícita:** uma sessão torna-se membro de um canal quando (a) emite um evento com `channel:X`, ou (b) é alvo direto de um `ask`/`reply`/`direct` com `channel:X`. `global` é o canal default — toda sessão sempre é membra.
+
+**Múltiplos canais no mesmo evento:** `channel:a,b` é visível a membros de `a` OU `b`.
+
+**Escopo do filtro (A1):** aplica-se a eventos em `## EVENTOS RELEVANTES` e a `say` em `## BROADCASTS`. Artefatos, recursos, diretivas e PEERS continuam swarm-wide.
+
+Exemplo:
+
+```
+ask REVIEWER revise-diff channel:review-42 spec:msg/FRONT-020.md
+reply FRONT ok channel:review-42 re:msg/FRONT-020.md
+say incidente-em-curso channel:sec
 ```
 
 ## Convenções de slug

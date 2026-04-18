@@ -17,10 +17,15 @@ The swarm directory must contain:
 
 Protocol v1. See docs/PROTOCOL.md for the event format.
 
-Multi-channel support (v1.4):
-    If MYCO_TOKEN is configured, the daemon operates in multi-channel mode.
-    Each unique token creates an isolated channel (identified by SHA256 hash).
-    Channels are completely isolated - no cross-channel visibility.
+Multi-tenant support (v1.4):
+    If --multi-tenant is set, the daemon operates in multi-tenant mode.
+    Each unique token creates an isolated tenant (identified by SHA256 hash).
+    Tenants are completely isolated - no cross-tenant visibility.
+
+    The legacy `--multi-channel` flag and `mode: "multi-channel"` string are
+    retained as aliases. The on-disk layout moved from channels/<sha>/ to
+    tenants/<sha>/; TenantManager migrates the directory automatically on
+    startup if the old path exists and the new one does not.
 """
 
 import hashlib
@@ -43,8 +48,8 @@ MIN_TOKEN_LENGTH = 32
 MIN_TOKEN_ENTROPY_BITS = 80  # roughly 16 random chars
 
 
-def _token_to_channel_id(token: str) -> str:
-    """Hash token to channel identifier. Uses SHA256 for isolation."""
+def _token_to_tenant_id(token: str) -> str:
+    """Hash token to tenant identifier. Uses SHA256 for isolation."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -162,7 +167,7 @@ def _sanitize_msg(content: str) -> str:
 
 # ---------- Event parsing ----------
 
-_KNOWN_KV_KEYS = {"ref", "spec", "ack", "addr", "result", "re"}
+_KNOWN_KV_KEYS = {"ref", "spec", "ack", "addr", "result", "re", "channel"}
 _KV_RE = re.compile(r'\b([a-z]+):(\S+)')
 
 
@@ -192,6 +197,21 @@ def parse_detail_kvs(detail: str):
     parts.append(detail[prev:])
     free_text = " ".join(parts).split()
     return " ".join(free_text), kvs
+
+
+GLOBAL_CHANNEL = "global"
+
+
+def event_channels(ev) -> set:
+    """Channels an event belongs to. Default: {"global"} when channel: absent.
+
+    `channel:` value is a comma-separated list of names. Empty segments ignored.
+    """
+    raw = ev.get("kvs", {}).get("channel", "")
+    if not raw:
+        return {GLOBAL_CHANNEL}
+    chans = {c for c in raw.split(",") if c}
+    return chans or {GLOBAL_CHANNEL}
 
 
 def parse_event(session: str, line: str):
@@ -241,8 +261,11 @@ class SwarmIndex:
         self.answered_specs = set()        # spec ids that have been acked
         self.resolved_questions = set()    # (frm, to, ts) tuples resolved by reply
         self.last_seen = {}                  # session → timestamp string
-        self.broadcasts = []                 # (ts, session, text) from say verb
+        self.broadcasts = []                 # (ts, session, text, channels) from say verb
         self.replies = []                    # (ts, sender, target, spec) from reply verb
+        # channel membership: session → set of channels it belongs to
+        # every session is implicitly a member of "global"
+        self.session_channels = defaultdict(lambda: {GLOBAL_CHANNEL})
 
     def apply(self, ev):
         s = ev["session"]
@@ -254,6 +277,13 @@ class SwarmIndex:
         obj = ev["obj"]
         detail = ev["detail"]
         kvs = ev.get("kvs", {})
+
+        # Channel membership: author joins; targeted mention pulls target in.
+        # "global" is the implicit channel — no-op for sessions that don't opt in.
+        chans = event_channels(ev)
+        self.session_channels[s] |= chans
+        if verb in ("ask", "reply", "direct") and obj and obj not in ("all", s):
+            self.session_channels[obj] |= chans
 
         # Resource names can be multi-token: "up container iam-db"
         # We concatenate obj + detail for resource verbs
@@ -335,8 +365,8 @@ class SwarmIndex:
                 self.session_status[s] = "active"
                 self.session_action[s] = f"reply {obj}"
         elif verb == "say":
-            # Broadcast visible to all sessions
-            self.broadcasts.append((ev["ts"], s, f"{obj} {detail_text}".strip()))
+            # Broadcast within the event's channel(s); default channel = "global" = all.
+            self.broadcasts.append((ev["ts"], s, f"{obj} {detail_text}".strip(), chans))
             if s not in self.session_status or self.session_status[s] == "unknown":
                 self.session_status[s] = "active"
                 self.session_action[s] = f"say {obj}"
@@ -407,6 +437,25 @@ class SwarmIndex:
     #             detail verbs (note/ask) filtered by relationship
     #   - explicit subscription: sessions declare what they watch
 
+    def _in_channel_scope(self, ev, session: str) -> bool:
+        """True if `session` can see `ev` under channel rules.
+
+        Rules:
+          - own events: always in scope
+          - global events: always in scope
+          - direct mention (obj == session): always in scope (overrides scope)
+          - otherwise: session must share a channel with the event
+        """
+        if ev["session"] == session:
+            return True
+        ev_chans = event_channels(ev)
+        if GLOBAL_CHANNEL in ev_chans:
+            return True
+        if ev.get("obj") == session:
+            return True
+        my_chans = self.session_channels.get(session, {GLOBAL_CHANNEL})
+        return bool(ev_chans & my_chans)
+
     def _is_visible(self, ev, session: str) -> bool:
         """Decide if `ev` should appear in `session`'s view.
         Override this method to change visibility rules."""
@@ -417,7 +466,12 @@ class SwarmIndex:
         if s == session:
             return True
 
-        # Directives and broadcasts: always visible
+        # Channel scope gates everything below. Without it we'd leak
+        # events from private channels to non-members.
+        if not self._in_channel_scope(ev, session):
+            return False
+
+        # Directives and broadcasts: always visible (within channel scope)
         if verb in ("direct", "say"):
             return True
 
@@ -668,10 +722,15 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
             lines.append("Nenhum conflito detectado.")
         lines.append("")
 
-    # BROADCASTS (say verb)
-    if index.broadcasts:
+    # BROADCASTS (say verb) — respect channel scope
+    my_chans = index.session_channels.get(session, {GLOBAL_CHANNEL})
+    visible_bcasts = [
+        (ts, sender, text) for ts, sender, text, chans in index.broadcasts[-50:]
+        if sender == session or GLOBAL_CHANNEL in chans or (chans & my_chans)
+    ][-5:]
+    if visible_bcasts:
         lines.append("## BROADCASTS")
-        for ts, sender, text in index.broadcasts[-5:]:
+        for ts, sender, text in visible_bcasts:
             lines.append(f"- [{ts}] **{sender}**: {text}")
         lines.append("")
 
@@ -965,27 +1024,36 @@ class Daemon:
 
 
 
-# ---------- Multi-channel support ----------
+# ---------- Multi-tenant support ----------
 
-class ChannelManager:
-    """Manages multiple isolated channels, one per unique token.
+class TenantManager:
+    """Manages multiple isolated tenants, one per unique token.
 
-    Each channel is a completely isolated Daemon instance with its own
-    log/, view/, msg/ directories. Channels are identified by SHA256(token).
+    Each tenant is a completely isolated Daemon instance with its own
+    log/, view/, msg/ directories. Tenants are identified by SHA256(token).
 
     Security features:
     - Token strength validation (min length, entropy)
     - Rate limiting per IP to prevent brute-force
-    - Zero cross-channel visibility
+    - Zero cross-tenant visibility
     """
 
     def __init__(self, base_dir: Path, verbose: bool = False):
         self.base_dir = base_dir
-        self.channels_dir = base_dir / "channels"
-        self.channels_dir.mkdir(parents=True, exist_ok=True)
         self.verbose = verbose
 
-        # channel_id -> Daemon instance
+        # Migrate legacy on-disk layout: channels/ → tenants/. Idempotent:
+        # only renames when the old path exists and the new one doesn't.
+        legacy_dir = base_dir / "channels"
+        self.tenants_dir = base_dir / "tenants"
+        if legacy_dir.is_dir() and not self.tenants_dir.exists():
+            os.rename(legacy_dir, self.tenants_dir)
+            if verbose:
+                print(f"[tenant-mgr] migrated {legacy_dir} → {self.tenants_dir}",
+                      file=sys.stderr)
+        self.tenants_dir.mkdir(parents=True, exist_ok=True)
+
+        # tenant_id -> Daemon instance
         self.daemons = {}
         self.lock = threading.Lock()
 
@@ -996,28 +1064,28 @@ class ChannelManager:
             cooldown_seconds=300,
         )
 
-        # Reload existing channels from disk
-        self._reload_channels()
+        # Reload existing tenants from disk
+        self._reload_tenants()
 
-    def _reload_channels(self):
-        """Scan channels/ directory and initialize Daemon for each existing channel."""
-        for channel_dir in self.channels_dir.iterdir():
-            if not channel_dir.is_dir():
+    def _reload_tenants(self):
+        """Scan tenants/ directory and initialize Daemon for each existing tenant."""
+        for tenant_dir in self.tenants_dir.iterdir():
+            if not tenant_dir.is_dir():
                 continue
-            channel_id = channel_dir.name
-            if channel_id not in self.daemons:
+            tenant_id = tenant_dir.name
+            if tenant_id not in self.daemons:
                 try:
-                    daemon = Daemon(channel_dir, verbose=self.verbose)
+                    daemon = Daemon(tenant_dir, verbose=self.verbose)
                     # Initialize: ensure DIRECTOR exists, replay logs
                     (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
                     daemon.index.sessions_known.add("DIRECTOR")
                     daemon.scan_once()
                     daemon._render_to_cache()
-                    self.daemons[channel_id] = daemon
+                    self.daemons[tenant_id] = daemon
                     if self.verbose:
-                        print(f"[channel-mgr] loaded channel {channel_id[:8]}...", file=sys.stderr)
+                        print(f"[tenant-mgr] loaded tenant {tenant_id[:8]}...", file=sys.stderr)
                 except Exception as e:
-                    print(f"[channel-mgr] failed to load channel {channel_id}: {e}", file=sys.stderr)
+                    print(f"[tenant-mgr] failed to load tenant {tenant_id}: {e}", file=sys.stderr)
 
     def authenticate(self, token: str, client_ip: str, allow_create: bool = True) -> tuple[Daemon | None, str]:
         """Authenticate token and return the corresponding Daemon.
@@ -1025,7 +1093,7 @@ class ChannelManager:
         Args:
             token: The auth token
             client_ip: Client IP for rate limiting
-            allow_create: If True, create new channel for valid new tokens
+            allow_create: If True, create new tenant for valid new tokens
 
         Returns:
             (daemon, error_message)
@@ -1041,55 +1109,55 @@ class ChannelManager:
             self.rate_limiter.record_failure(client_ip)
             return None, "missing token"
 
-        channel_id = _token_to_channel_id(token)
-        channel_dir = self.channels_dir / channel_id
+        tenant_id = _token_to_tenant_id(token)
+        tenant_dir = self.tenants_dir / tenant_id
 
-        # Existing channel: grant access
-        if channel_id in self.daemons:
+        # Existing tenant: grant access
+        if tenant_id in self.daemons:
             self.rate_limiter.record_success(client_ip)
-            return self.daemons[channel_id], ""
+            return self.daemons[tenant_id], ""
 
-        # New channel: validate token strength before creating
+        # New tenant: validate token strength before creating
         if not allow_create:
             self.rate_limiter.record_failure(client_ip)
-            return None, "channel does not exist"
+            return None, "tenant does not exist"
 
         valid, err = _validate_token_strength(token)
         if not valid:
             self.rate_limiter.record_failure(client_ip)
             return None, f"token rejected: {err}"
 
-        # Create new channel
+        # Create new tenant
         with self.lock:
             # Double-check (another thread might have created it)
-            if channel_id in self.daemons:
+            if tenant_id in self.daemons:
                 self.rate_limiter.record_success(client_ip)
-                return self.daemons[channel_id], ""
+                return self.daemons[tenant_id], ""
 
             try:
-                channel_dir.mkdir(parents=True, exist_ok=True)
-                daemon = Daemon(channel_dir, verbose=self.verbose)
+                tenant_dir.mkdir(parents=True, exist_ok=True)
+                daemon = Daemon(tenant_dir, verbose=self.verbose)
                 # Initialize
                 (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
                 daemon.index.sessions_known.add("DIRECTOR")
                 daemon.scan_once()
                 daemon._render_to_cache()
-                self.daemons[channel_id] = daemon
+                self.daemons[tenant_id] = daemon
 
                 if self.verbose:
-                    print(f"[channel-mgr] created channel {channel_id[:8]}... (token validated)", file=sys.stderr)
+                    print(f"[tenant-mgr] created tenant {tenant_id[:8]}... (token validated)", file=sys.stderr)
 
                 self.rate_limiter.record_success(client_ip)
                 return daemon, ""
 
             except Exception as e:
                 self.rate_limiter.record_failure(client_ip)
-                return None, f"failed to create channel: {e}"
+                return None, f"failed to create tenant: {e}"
 
     def poll_all(self):
-        """Poll all active channels for new events."""
+        """Poll all active tenants for new events."""
         with self.lock:
-            for channel_id, daemon in list(self.daemons.items()):
+            for tenant_id, daemon in list(self.daemons.items()):
                 try:
                     changed = daemon.scan_once()
                     if changed:
@@ -1102,20 +1170,27 @@ class ChannelManager:
                                 write_view_atomic(daemon.view_dir / f"{s}.md", content)
                 except Exception as e:
                     if self.verbose:
-                        print(f"[channel-mgr] error polling {channel_id[:8]}...: {e}", file=sys.stderr)
+                        print(f"[tenant-mgr] error polling {tenant_id[:8]}...: {e}", file=sys.stderr)
+
+
+# Backwards-compatible alias: external code/tests may still import ChannelManager.
+ChannelManager = TenantManager
 
 
 # ---------- HTTP server ----------
 
 class MycoHTTPServer(ThreadingHTTPServer):
-    """HTTP server that holds a reference to the Daemon or ChannelManager."""
+    """HTTP server that holds a reference to the Daemon or TenantManager."""
 
     def __init__(self, server_address, handler_class, daemon_or_manager):
-        # In multi-channel mode, daemon_or_manager is a ChannelManager
-        # In single-channel mode, it's a Daemon (backward compat)
+        # In multi-tenant mode, daemon_or_manager is a TenantManager
+        # In single-tenant mode (legacy "single-channel"), it's a Daemon
         self.daemon_ref = daemon_or_manager
-        self.multi_channel = isinstance(daemon_or_manager, ChannelManager)
-        self.auth_token = os.environ.get("MYCO_TOKEN", "") if not self.multi_channel else ""
+        self.multi_tenant = isinstance(daemon_or_manager, TenantManager)
+        # Legacy attribute — kept so downstream code/tests that read .multi_channel
+        # continue to work. Both attributes point at the same boolean.
+        self.multi_channel = self.multi_tenant
+        self.auth_token = os.environ.get("MYCO_TOKEN", "") if not self.multi_tenant else ""
         super().__init__(server_address, handler_class)
 
 
@@ -1125,13 +1200,13 @@ class MycoHandler(BaseHTTPRequestHandler):
     def _get_daemon(self) -> tuple[Daemon | None, str]:
         """Get the daemon for this request.
 
-        In single-channel mode: returns the singleton daemon.
-        In multi-channel mode: authenticates token and returns the channel daemon.
+        In single-tenant mode: returns the singleton daemon.
+        In multi-tenant mode: authenticates token and returns the tenant daemon.
 
         Returns (daemon, error_message).
         """
-        if not self.server.multi_channel:
-            # Single-channel mode: simple token check
+        if not self.server.multi_tenant:
+            # Single-tenant mode: simple token check
             token = self.server.auth_token
             if not token:
                 return self.server.daemon_ref, ""  # no auth configured
@@ -1140,7 +1215,7 @@ class MycoHandler(BaseHTTPRequestHandler):
                 return self.server.daemon_ref, ""
             return None, "unauthorized"
 
-        # Multi-channel mode: extract token and authenticate
+        # Multi-tenant mode: extract token and authenticate
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             return None, "missing or invalid Authorization header"
@@ -1155,19 +1230,22 @@ class MycoHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/healthz":
             # Health check — no auth required
-            if self.server.multi_channel:
+            if self.server.multi_tenant:
                 manager = self.server.daemon_ref
+                n = len(manager.daemons)
                 body = json.dumps({
                     "ok": True,
-                    "mode": "multi-channel",
-                    "channels": len(manager.daemons),
+                    "mode": "multi-tenant",
+                    "tenants": n,
+                    # Legacy keys retained for tooling that predates the rename:
+                    "channels": n,
                 })
             else:
                 daemon = self.server.daemon_ref
                 uptime = time.time() - daemon.start_time
                 body = json.dumps({
                     "ok": True,
-                    "mode": "single-channel",
+                    "mode": "single-tenant",
                     "uptime_s": round(uptime, 1),
                     "sessions": len(daemon.index.sessions_known),
                 })
@@ -1313,7 +1391,7 @@ class MycoHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         verbose = False
-        if self.server.multi_channel:
+        if self.server.multi_tenant:
             verbose = self.server.daemon_ref.verbose
         else:
             verbose = self.server.daemon_ref.verbose
@@ -1323,7 +1401,8 @@ class MycoHandler(BaseHTTPRequestHandler):
 
 def main():
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
-    multi_channel = "--multi-channel" in sys.argv
+    # --multi-channel is accepted as a deprecated alias for --multi-tenant.
+    multi_tenant = "--multi-tenant" in sys.argv or "--multi-channel" in sys.argv
     port = 0
     args_raw = sys.argv[1:]
     # Parse args
@@ -1338,27 +1417,27 @@ def main():
             i += 1
         elif args_raw[i] in ("-q", "--quiet"):
             i += 1
-        elif args_raw[i] == "--multi-channel":
+        elif args_raw[i] in ("--multi-tenant", "--multi-channel"):
             i += 1
         else:
             filtered.append(args_raw[i])
             i += 1
     if not filtered:
-        print("usage: mycod.py [-q|--quiet] [--port PORT] [--multi-channel] <swarm_dir>", file=sys.stderr)
+        print("usage: mycod.py [-q|--quiet] [--port PORT] [--multi-tenant] <swarm_dir>", file=sys.stderr)
         sys.exit(2)
 
     swarm_dir = Path(filtered[0]).resolve()
     verbose = not quiet
 
-    if multi_channel:
-        # Multi-channel mode: requires HTTP server
+    if multi_tenant:
+        # Multi-tenant mode: requires HTTP server
         if port == 0:
-            port = 8000  # default port for multi-channel
-        manager = ChannelManager(swarm_dir, verbose=verbose)
+            port = 8000  # default port for multi-tenant
+        manager = TenantManager(swarm_dir, verbose=verbose)
         server = MycoHTTPServer(("", port), MycoHandler, manager)
-        print(f"[mycod] multi-channel mode", file=sys.stderr)
+        print(f"[mycod] multi-tenant mode", file=sys.stderr)
         print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
-        print(f"[mycod] channels dir: {manager.channels_dir}", file=sys.stderr)
+        print(f"[mycod] tenants dir: {manager.tenants_dir}", file=sys.stderr)
         print(f"[mycod] token requirements: min {MIN_TOKEN_LENGTH} chars, min {MIN_TOKEN_ENTROPY_BITS} bits entropy", file=sys.stderr)
         # Poll loop
         try:
@@ -1370,7 +1449,7 @@ def main():
         except KeyboardInterrupt:
             server.shutdown()
     else:
-        # Single-channel mode (backward compat)
+        # Single-tenant mode (backward compat)
         Daemon(swarm_dir, verbose=verbose).run(port=port)
 
 

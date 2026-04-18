@@ -81,6 +81,21 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
 | `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
 | `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
+| `channel:` | canal(is) de visibilidade; default `global`; lista por vírgula | `channel:review-42` / `channel:sec,ops` |
+
+## Canais de visibilidade
+
+Por default todo evento é visto por todas as sessões. Se você quer isolar uma conversa (ex: code review, incidente), adicione `channel:<nome>` em qualquer evento. Só sessões do canal veem — bystanders ficam limpos.
+
+Uma sessão entra num canal quando ela posta nele, ou quando é alvo direto de um `ask`/`reply`/`direct` nesse canal. `global` é o canal default — todo mundo sempre vê.
+
+```
+<myco>
+ask REVIEWER revise-diff-42 channel:review-42 spec:msg/FRONT-020.md
+</myco>
+```
+
+Sem `channel:`, comportamento é como sempre foi (`global`, todos veem).
 
 ## Comunicação rica via msg/
 

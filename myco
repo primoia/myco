@@ -3,28 +3,30 @@
 # myco — launch a Claude Code session connected to a myco swarm
 #
 # Usage:
-#   myco <SESSION> [project_dir] [--daemon URL] [--channel TOKEN] [--resume] [-- claude_flags...]
+#   myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume] [-- claude_flags...]
 #
 # Examples:
 #   myco FRONT                                                    # session FRONT in current dir
 #   myco FRONT ~/primoia                                          # session FRONT in ~/primoia
-#   myco FRONT ~/primoia --channel myco-abc123...                 # with explicit channel token
+#   myco FRONT ~/primoia --tenant myco-abc123...                  # with explicit tenant token
 #   myco FRONT ~/primoia --daemon http://10.0.1.5:8000            # connect to remote daemon
 #   myco FRONT ~/primoia --daemon http://10.0.1.5:8000 \
-#                        --channel myco-abc123...                 # remote daemon + channel
+#                        --tenant myco-abc123...                  # remote daemon + tenant
 #   myco FRONT ~/primoia --resume                                 # resume last session
 #   myco FRONT . -- --model sonnet                                # pass flags to claude
 #
+# --channel is accepted as a deprecated alias for --tenant (same semantics).
+#
 # Environment (optional, has defaults):
 #   MYCO_URL    — daemon URL (default: http://localhost:8000, can be set via --daemon)
-#   MYCO_TOKEN  — auth token (default: none, can be set via --channel)
+#   MYCO_TOKEN  — auth token (default: none, can be set via --tenant)
 #
 set -euo pipefail
 
 MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ $# -lt 1 ]; then
-    echo "usage: myco <SESSION> [project_dir] [--daemon URL] [--channel TOKEN] [--resume] [-- claude_flags...]" >&2
+    echo "usage: myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume] [-- claude_flags...]" >&2
     exit 2
 fi
 
@@ -35,7 +37,7 @@ shift
 PROJECT_DIR="."
 CLAUDE_ARGS=()
 RESUME=false
-CHANNEL_TOKEN=""
+TENANT_TOKEN=""
 DAEMON_URL=""
 
 while [ $# -gt 0 ]; do
@@ -48,12 +50,12 @@ while [ $# -gt 0 ]; do
             DAEMON_URL="$2"
             shift 2
             ;;
-        --channel)
+        --tenant|--channel)
             if [ $# -lt 2 ]; then
-                echo "error: --channel requires a token argument" >&2
+                echo "error: $1 requires a token argument" >&2
                 exit 2
             fi
-            CHANNEL_TOKEN="$2"
+            TENANT_TOKEN="$2"
             shift 2
             ;;
         --resume)
@@ -128,16 +130,16 @@ else
     export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
 fi
 
-# Set token from --channel flag or inherit from environment
-if [ -n "$CHANNEL_TOKEN" ]; then
-    export MYCO_TOKEN="$CHANNEL_TOKEN"
+# Set token from --tenant flag or inherit from environment
+if [ -n "$TENANT_TOKEN" ]; then
+    export MYCO_TOKEN="$TENANT_TOKEN"
 fi
 # Otherwise MYCO_TOKEN inherited from environment if set
 
 echo "[myco] session=$SESSION project=$PROJECT_DIR"
 echo "[myco] daemon=$MYCO_URL"
 if [ -n "${MYCO_TOKEN:-}" ]; then
-    echo "[myco] channel token configured (${#MYCO_TOKEN} chars)"
+    echo "[myco] tenant token configured (${#MYCO_TOKEN} chars)"
 fi
 
 if [ "$RESUME" = true ]; then
