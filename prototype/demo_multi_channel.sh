@@ -1,5 +1,5 @@
 #!/bin/bash
-# Demonstração prática de multi-tenant mode
+# Demonstração prática de multi-channel mode
 
 set -e
 
@@ -14,7 +14,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=========================================="
-echo "Demo: Multi-Tenant Mode"
+echo "Demo: Multi-Channel Mode"
 echo "=========================================="
 echo
 
@@ -28,15 +28,15 @@ echo "  Backend:  ${TOKEN_BACKEND:0:30}..."
 echo
 
 cleanup
-echo "Iniciando daemon em modo multi-tenant..."
-python3 mycod.py --multi-tenant --port $PORT "$SWARM_DIR" > /dev/null 2>&1 &
+echo "Iniciando daemon em modo multi-channel..."
+python3 mycod.py --multi-channel --port $PORT "$SWARM_DIR" > /dev/null 2>&1 &
 DAEMON_PID=$!
 sleep 2
 echo "✓ Daemon rodando na porta $PORT"
 echo
 
 # Simular time Frontend
-echo "=== Time Frontend (tenant isolado) ==="
+echo "=== Time Frontend (canal isolado) ==="
 curl -s -X POST \
     -H "Authorization: Bearer $TOKEN_FRONTEND" \
     -H "Content-Type: application/json" \
@@ -54,7 +54,7 @@ echo "  - DESIGN: iniciou wireframes"
 echo
 
 # Simular time Backend
-echo "=== Time Backend (tenant isolado) ==="
+echo "=== Time Backend (canal isolado) ==="
 curl -s -X POST \
     -H "Authorization: Bearer $TOKEN_BACKEND" \
     -H "Content-Type: application/json" \
@@ -76,16 +76,16 @@ echo "=== Verificando Isolamento ==="
 
 VIEW_REACT=$(curl -s -H "Authorization: Bearer $TOKEN_FRONTEND" http://localhost:$PORT/view/REACT)
 if echo "$VIEW_REACT" | grep -q "DESIGN" && ! echo "$VIEW_REACT" | grep -q "API"; then
-    echo "  ✓ REACT vê DESIGN (mesmo tenant)"
-    echo "  ✓ REACT NÃO vê API (tenant diferente)"
+    echo "  ✓ REACT vê DESIGN (mesmo canal)"
+    echo "  ✓ REACT NÃO vê API (canal diferente)"
 else
     echo "  ✗ FALHA no isolamento"
 fi
 
 VIEW_API=$(curl -s -H "Authorization: Bearer $TOKEN_BACKEND" http://localhost:$PORT/view/API)
 if echo "$VIEW_API" | grep -q "DB" && ! echo "$VIEW_API" | grep -q "REACT"; then
-    echo "  ✓ API vê DB (mesmo tenant)"
-    echo "  ✓ API NÃO vê REACT (tenant diferente)"
+    echo "  ✓ API vê DB (mesmo canal)"
+    echo "  ✓ API NÃO vê REACT (canal diferente)"
 else
     echo "  ✗ FALHA no isolamento"
 fi
@@ -95,7 +95,7 @@ echo
 echo "=== Status do Daemon ==="
 HEALTH=$(curl -s http://localhost:$PORT/healthz)
 echo "  Modo: $(echo $HEALTH | python3 -c "import json,sys; print(json.load(sys.stdin)['mode'])")"
-echo "  Tenants ativos: $(echo $HEALTH | python3 -c "import json,sys; print(json.load(sys.stdin)['tenants'])")"
+echo "  Canais ativos: $(echo $HEALTH | python3 -c "import json,sys; print(json.load(sys.stdin)['channels'])")"
 echo
 
 echo "=========================================="
@@ -103,6 +103,6 @@ echo "✓ Demo concluída!"
 echo "=========================================="
 echo
 echo "Estrutura criada:"
-ls -1 "$SWARM_DIR/tenants/"
+ls -1 "$SWARM_DIR/channels/"
 echo
-echo "Cada hash SHA256 representa um tenant isolado."
+echo "Cada hash SHA256 representa um canal isolado."
