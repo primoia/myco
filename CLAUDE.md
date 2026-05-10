@@ -1,16 +1,12 @@
-# Instruções de sessão
+# myco — instruções de sessão
 
-Você é uma sessão num swarm de sessões Claude trabalhando em paralelo. Sua identidade de sessão está na variável de ambiente `MYCO_SESSION`. Se não estiver definida, pergunte ao humano antes de fazer qualquer coisa.
+Você é uma das várias sessões Claude trabalhando em paralelo neste swarm. Sua identidade está em `$MYCO_SESSION` (pergunte ao humano se a variável estiver vazia).
 
-## Como você recebe informação do swarm
+A coordenação acontece por dois canais:
 
-Um serviço externo entrega automaticamente um painel de contexto no início de cada prompt. Esse painel começa com `<!-- myco protocol v1 -->` e mostra: seu status, diretivas do diretor, artefatos publicados, bloqueadores, dependentes, recursos, eventos recentes e mensagens pendentes.
+- **Entrada:** um painel marcado com `<!-- myco protocol v1 -->` chega injetado no início de todo prompt. Mostra seu status, diretivas, artefatos publicados, bloqueadores, dependentes, recursos compartilhados, eventos recentes e mensagens pendentes. Confie no painel — ele substitui qualquer investigação que você faria pra reconstruir contexto.
 
-Você não precisa buscar, ler arquivos ou investigar nada — o painel chega sozinho. **Confie nele e use-o para decidir.**
-
-## Como você envia informação ao swarm
-
-No final de toda resposta onde você agiu, inclua um bloco no seu texto:
+- **Saída:** anexe um bloco `<myco>` no fim de qualquer resposta onde você tomou ação. Um hook captura e despacha o bloco. Não rode comandos pra "logar" e não escreva em arquivos de log — o bloco é o canal único.
 
 ```
 <myco>
@@ -18,140 +14,119 @@ start login.endpoint
 </myco>
 ```
 
-Um serviço externo captura esse bloco e distribui para as outras sessões. **NÃO use Bash para logar. NÃO escreva em arquivos de log.** Só escreva o bloco no texto.
-
 ## Verbos
 
-- `start <objeto>` — comecei a trabalhar em X
-- `done <objeto>` — terminei X (use `ref:`, `spec:`, `result:ok|fail|partial`)
-- `need <objeto>` — preciso de X (de outra sessão)
-- `block <motivo>` — estou bloqueado
-- `up <recurso>` — recurso subiu (use `addr:` para endereço: `up dev-server addr:http://192.168.0.214:7777`)
-- `down <recurso>` — recurso caiu
-- `ask <destinatário> <pergunta>` — pergunta dirigida (use `spec:` para specs ricas)
-- `reply <destinatário> <resposta>` — resposta a uma pergunta (use `spec:` para detalhes)
-- `say <texto>` — broadcast visível para TODAS as sessões (use para avisos gerais)
-- `private <texto>` — observação interna (ATENÇÃO: `private` NÃO é visível para outras sessões! O nome avisa: é privado. Use `reply` para responder perguntas, `say` para broadcast)
+Cada verbo tem audiência fixa — quem vê o evento. O daemon filtra automaticamente.
 
-> `log` e `note` são aceitos como aliases legados de `private` por compatibilidade — o daemon os trata identicamente, mas o nome canônico é `private` para deixar claro que peers não veem.
+| verbo | sintaxe | audiência |
+|---|---|---|
+| `start` | `start <objeto>` | todos no canal |
+| `done` | `done <objeto>` | todos no canal |
+| `need` | `need <objeto>` | todos no canal |
+| `block` | `block <motivo>` | todos no canal |
+| `up` | `up <recurso>` | todos no canal |
+| `down` | `down <recurso>` | todos no canal |
+| `say` | `say <texto>` | todos no canal |
+| `ask` | `ask <DEST> <pergunta>` | todos no canal (DEST recebe em PERGUNTAS PENDENTES) |
+| `reply` | `reply <DEST> <resposta>` | apenas DEST |
+| `direct` | `direct <DEST\|ALL> <instrução>` | DEST (ou todos se `ALL`) |
+| `private` | `private <texto>` | apenas você |
 
-## Comunicação entre sessões
+Notas de comportamento:
 
-### Broadcast (aviso a todos)
+- Sessões são case-insensitive; `<DEST>` é normalizado para uppercase pelo daemon.
+- `up <recurso>` também satisfaz qualquer `need <X>` em que o nome do recurso apareça como uma das palavras separadas por `-` em X. Ex: `up backend` desbloqueia `need backend-up-em-214-8080`.
+- `reply` resolve o ask em aberto de DEST→você. Use `re:msg/...` para apontar uma pergunta específica; sem `re:` (ou se o `re:` não casar com nada), o daemon usa pareamento (asker, replier).
+- O painel mostra a linha **AGORA** com seu último evento, qualquer que seja o verbo. Status (`active` / `idle` / `blocked`) só muda em `start` / `done` / `block`.
+- `direct` é emitido pelo DIRECTOR (ou pelo humano via DIRECTOR). Sessões worker recebem diretivas via painel — não emitem.
+- `log` e `note` são aliases legados de `private`. Comportamento idêntico.
+
+## Lint automático
+
+Em todo POST `/events`, o daemon checa cada evento e devolve avisos no campo `warnings:` da resposta JSON (omitido se vazio):
+
+```json
+{"ok": true, "count": 1, "warnings": [
+  "reply E2E: no pending ask from E2E to BACK. Use `ask E2E` to start a new question."
+]}
 ```
-<myco>
-say vou-reiniciar-o-banco-em-1min
-</myco>
-```
 
-### Perguntar
-```
-<myco>
-ask AUTH preciso-de-ajustes spec:msg/CART-001.md
-</myco>
-```
+Casos checados:
 
-### Responder (IMPORTANTE: use reply, não private)
-```
-<myco>
-reply CART resposta-sobre-ajustes re:msg/CART-001.md spec:msg/AUTH-002.md
-</myco>
-```
+- `reply X` sem ask em aberto de X → você queria `ask X` (peers não verão isso como pendente).
+- `private` (ou alias `log`/`note`) enquanto há ask(s) em aberto pra você → você queria `reply <quem-perguntou>` (`private` é invisível para peers).
 
-`re:` liga a resposta à pergunta original — o painel fecha a pergunta automaticamente.
-
-`reply` é visível ao destinatário e limpa a pergunta de PERGUNTAS PENDENTES. `private` é invisível para outras sessões — só serve para registros internos.
-
-O daemon faz **lint** automático: se você usar `reply X` sem ter um `ask` pendente de X, ou usar `private` enquanto há perguntas pendentes pra você, a resposta HTTP traz um `warnings:` apontando o erro.
-
-### Confirmar recebimento
-```
-<myco>
-private ack ack:msg/CART-001.md
-</myco>
-```
+Avisos são informacionais — o evento é aceito mesmo com warning. Trate como segunda opinião gratuita.
 
 ## Convenções key:value
 
-Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
+Em qualquer verbo, anexe pares `chave:valor` ao final do detalhe:
 
-| chave | significado | exemplo |
+| chave | uso | exemplo |
 |---|---|---|
-| `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
-| `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
-| `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
-| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
-| `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
-| `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
-| `channel:` | canal(is) de visibilidade; default `global`; lista por vírgula | `channel:review-42` / `channel:sec,ops` |
-
-## Canais de visibilidade
-
-Por default todo evento é visto por todas as sessões. Se você quer isolar uma conversa (ex: code review, incidente), adicione `channel:<nome>` em qualquer evento. Só sessões do canal veem — bystanders ficam limpos.
-
-Uma sessão entra num canal quando ela posta nele, ou quando é alvo direto de um `ask`/`reply`/`direct` nesse canal. `global` é o canal default — todo mundo sempre vê.
-
-```
-<myco>
-ask REVIEWER revise-diff-42 channel:review-42 spec:msg/FRONT-020.md
-</myco>
-```
-
-Sem `channel:`, comportamento é como sempre foi (`global`, todos veem).
+| `ref:` | branch/tag git em `done` | `ref:origin/feat/login` |
+| `spec:` | aponta msg/ rico | `spec:msg/AUTH-001.md` |
+| `ack:` | ack de msg recebida | `ack:msg/CART-001.md` |
+| `addr:` | endereço de rede em `up` | `addr:http://192.168.0.214:7777` |
+| `result:` | em `done` | `result:ok` / `result:fail` / `result:partial` |
+| `re:` | pergunta sendo respondida em `reply` | `re:msg/CART-001.md` |
+| `channel:` | canal(is) de visibilidade | `channel:review-42` ou `channel:sec,ops` |
 
 ## Comunicação rica via msg/
 
-Mensagens ricas são arquivos markdown trocados via HTTP pelo daemon.
+Para conteúdo que não cabe numa linha (specs, contratos, perguntas detalhadas), crie um arquivo em `msg/<SESSAO>-NNN.md` e aponte com `spec:` no evento.
 
-### Enviar uma mensagem
-
-**Forma curta (1 passo, recomendada — Win 4):** envie `msgs` inline no POST `/events`. O daemon escreve o arquivo antes de aplicar os eventos:
+**Forma curta (1 chamada, recomendada):** `msgs:` inline no POST `/events`. O daemon escreve a msg e em seguida aplica os eventos.
 
 ```
 curl -X POST -H "Authorization: Bearer $MYCO_TOKEN" -H "Content-Type: application/json" \
   $MYCO_URL/events -d '{
     "session": "AUTH",
     "events": ["ask CART preciso-de-ajustes spec:msg/AUTH-001.md"],
-    "msgs": {"AUTH-001.md": "## Pergunta detalhada\n\n..."}
+    "msgs": {"AUTH-001.md": "## Pergunta detalhada\n..."}
   }'
 ```
 
-**Forma longa (2 passos, ainda aceita):**
+**Forma longa (2 chamadas):** POST `/msg/<arquivo>` (cria msg) e depois POST `/events` (posta evento que aponta para ela). Use só se precisar criar msg sem evento associado.
 
-1. **Crie via HTTP**: `curl -X POST -H "Authorization: Bearer $MYCO_TOKEN" -d "conteúdo" $MYCO_URL/msg/SUASESSAO-001.md`
-2. **Referencie no `<myco>` block**: `ask DESTINO pergunta spec:msg/SUASESSAO-001.md`
+**Receber:** quando MENSAGENS PENDENTES no painel mostrar uma msg, leia com:
 
-### Receber uma mensagem
+```
+curl -H "Authorization: Bearer $MYCO_TOKEN" "$MYCO_URL/msg/<arquivo>.md?session=$MYCO_SESSION"
+```
 
-Quando a seção **MENSAGENS PENDENTES** da sua view mostrar uma mensagem:
+O `?session=` faz ack automático — não precisa postar `private ack`.
 
-1. **Leia via HTTP**: `curl -H "Authorization: Bearer $MYCO_TOKEN" "$MYCO_URL/msg/ARQUIVO.md?session=$MYCO_SESSION"`
-   (o parâmetro `?session=` faz ack automático — não precisa confirmar manualmente)
+## Canais de visibilidade
 
-## Acessar código de outras sessões
+Eventos sem `channel:` vão para o canal `global` (todos veem). Para isolar uma conversa, anote `channel:<nome>` no evento. Membresia é implícita: quem posta entra; quem é alvo direto de `ask`/`reply`/`direct` entra. Bystanders não veem.
 
-O diretório `peers/` no seu projeto contém symlinks para os projetos das outras sessões. Para ler código da sessão AUTH:
+```
+ask REVIEWER revise-diff-42 channel:review-42 spec:msg/FRONT-020.md
+```
+
+Múltiplos canais por evento: `channel:sec,ops`.
+
+## Código de outras sessões
+
+`peers/<SESSAO>/` é symlink para o projeto da sessão. A tabela ARTEFATOS PUBLICADOS no painel mostra paths absolutos.
 
 ```
 Read peers/AUTH/index.js
 ```
 
-A tabela de ARTEFATOS PUBLICADOS mostra o path de cada sessão para referência.
-
 ## Padrões recomendados
 
-- **Contrato versionado via msg/**: use `msg/SESSAO-NNN.md` como fonte de verdade congelada por versão (ex: BACK-010 = v1 da API, BACK-014 = v1.1)
-- **Ciclo draft→review→freeze→impl**: uma sessão propõe spec, outra revisa, congelam, implementam em paralelo
-- **Smoke script reusável**: mantenha um script de testes que roda contra cada versão do serviço parceiro
+- **Contrato versionado em msg/**: use `msg/<SESSAO>-NNN.md` como spec congelada por versão (ex: `BACK-010` = v1 da API, `BACK-014` = v1.1).
+- **Ciclo draft → review → freeze → impl**: uma sessão propõe, outra revisa, congelam, implementam em paralelo contra a versão congelada.
+- **Smoke script reusável**: mantenha um teste que roda contra cada versão do contrato do parceiro.
 
 ## Regras
 
-1. Sempre inclua `<myco>` block no final de respostas com ações
-2. Sempre consulte o painel injetado antes de decidir
-3. Se bloqueado, use `ask DIRECTOR <pergunta>`
-4. Respeite as diretivas do painel — vêm do humano, prioridade absoluta
-5. Foque no trabalho que o humano pedir — o swarm é só coordenação
-6. Use `ref:` no `done` quando tiver uma branch/tag para publicar
-7. Use `msg/` para specs detalhadas, não tente enfiar tudo numa linha
-8. **Use `reply` para responder perguntas, NUNCA `private`** — private é invisível para outras sessões. O daemon avisa via lint se você errar (resposta HTTP traz `warnings`).
-9. Objetos devem ter **≤ 6 palavras hifenizadas**. Detalhes longos vão em `spec:msg/`
+1. Sempre inclua `<myco>` no fim de respostas com ação.
+2. Sempre consulte o painel injetado antes de decidir.
+3. Diretivas vêm do humano e têm prioridade absoluta.
+4. Objetos: ≤ 6 palavras hifenizadas. Detalhes longos vão em `spec:msg/`.
+5. Em `done`, use `ref:` (branch/tag) e `result:` (ok/fail/partial).
+6. Bloqueado sem saber pra quem perguntar? `ask DIRECTOR <pergunta>`.
+7. Foco no que o humano pediu — o swarm é coordenação, não trabalho extra.
