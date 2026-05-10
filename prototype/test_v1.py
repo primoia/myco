@@ -10,6 +10,8 @@ from mycod import (
     write_view_atomic, event_channels, GLOBAL_CHANNEL,
 )
 
+PROTOTYPE_DIR = str(Path(__file__).resolve().parent)
+
 
 # Strong token for HTTP tests: must satisfy MIN_TOKEN_LENGTH (32) and
 # MIN_TOKEN_ENTROPY_BITS (80) so ChannelManager will create the channel.
@@ -1054,7 +1056,7 @@ class TestMycoView:
         result = subprocess.run(
             ["python3", "myco_view.py", str(swarm_dir), "AUTH"],
             capture_output=True, text=True,
-            cwd="/home/cezar/Workspace/myco/prototype",
+            cwd=PROTOTYPE_DIR,
         )
         assert result.returncode == 0
         assert "<!-- myco protocol v1 -->" in result.stdout
@@ -1190,7 +1192,7 @@ class TestMycoViewCli:
         result = subprocess.run(
             ["python3", "myco_view.py"],
             capture_output=True, text=True,
-            cwd="/home/cezar/Workspace/myco/prototype",
+            cwd=PROTOTYPE_DIR,
         )
         assert result.returncode == 2
 
@@ -1199,7 +1201,7 @@ class TestMycoViewCli:
         result = subprocess.run(
             ["python3", "myco_view.py", "/nonexistent", "AUTH"],
             capture_output=True, text=True,
-            cwd="/home/cezar/Workspace/myco/prototype",
+            cwd=PROTOTYPE_DIR,
         )
         assert result.returncode == 0
         assert result.stdout == ""
