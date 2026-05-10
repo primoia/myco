@@ -25,11 +25,13 @@ A cada prompt, um hook injeta automaticamente a sua **myco view** como `addition
 | `direct <sessão> <instrução>` | diretiva (DIRECTOR→worker) | destinatário |
 | `ask <destinatário> <pergunta>` | pergunta dirigida | destinatário |
 | `reply <destinatário> <resposta>` | resposta a pergunta | destinatário |
-| `log <texto>` | observação interna | **SÓ VOCÊ** |
+| `private <texto>` | observação interna | **SÓ VOCÊ** |
 
-**IMPORTANTE**: `log` é invisível para outras sessões. Para responder perguntas, use `reply`. Para confirmar recebimento de msg/, use `log ack ack:ID` (este caso especial é visível).
+**IMPORTANTE**: `private` é invisível para outras sessões — o nome avisa: é privado. Para responder perguntas, use `reply`. Para broadcast, use `say`. Para confirmar recebimento de msg/, use `private ack ack:ID` (esse caso especial é visível).
 
-> `note` é aceito como alias de `log` por compatibilidade.
+O daemon faz **lint automático**: usar `reply X` sem ask pendente de X, ou `private` enquanto há asks pendentes pra você, devolve `warnings:` na resposta HTTP. Tente acertar de primeira; se errar, o aviso te avisa.
+
+> `log` e `note` são aceitos como aliases legados de `private` por compatibilidade.
 
 ## Convenções key:value
 
@@ -63,7 +65,7 @@ reply CART resposta re:msg/CART-001.md spec:msg/AUTH-002.md
 ### Confirmar recebimento de msg/
 ```
 <myco>
-log ack ack:msg/CART-001.md
+private ack ack:msg/CART-001.md
 </myco>
 ```
 
@@ -71,9 +73,20 @@ log ack ack:msg/CART-001.md
 
 O diretório de mensagens fica em `$MYCO_SWARM/msg/`.
 
-**Enviar:** crie via Bash (`echo "..." > $MYCO_SWARM/msg/SESSAO-001.md`) e referencie no `<myco>` block com `spec:`.
+**Enviar (1 passo, recomendado — Win 4):** envie `msgs` inline no POST `/events`. O daemon escreve o arquivo antes de aplicar os eventos:
 
-**Receber:** quando MENSAGENS PENDENTES aparecer na view, leia com Read (path na view) e confirme com `note ack ack:ID`.
+```
+curl -X POST -H "Authorization: Bearer $MYCO_TOKEN" -H "Content-Type: application/json" \
+  $MYCO_URL/events -d '{
+    "session": "AUTH",
+    "events": ["ask CART preciso-de-ajustes spec:msg/AUTH-001.md"],
+    "msgs": {"AUTH-001.md": "## Pergunta detalhada\n..."}
+  }'
+```
+
+**Enviar (forma longa):** crie via Bash (`echo "..." > $MYCO_SWARM/msg/SESSAO-001.md`) e referencie no `<myco>` block com `spec:`.
+
+**Receber:** quando MENSAGENS PENDENTES aparecer na view, leia com Read (path na view) e confirme com `private ack ack:ID`.
 
 ## Acessar código de outras sessões
 
@@ -96,7 +109,7 @@ A tabela de ARTEFATOS PUBLICADOS mostra o path absoluto de cada sessão.
 1. **Sempre** logue depois de agir (bloco `<myco>` no final da resposta)
 2. **Sempre** use o contexto injetado (sua view) para informar decisões
 3. **Nunca** edite arquivos de `view/` diretamente (são gerados pelo daemon)
-4. **Use `reply` para responder perguntas, NUNCA `log`**
+4. **Use `reply` para responder perguntas, NUNCA `private`** (o lint avisa se errar)
 5. Se bloqueado, use `ask DIRECTOR <pergunta>`
 6. **Respeite as diretivas** — vêm do humano, prioridade absoluta
 7. Use `ref:` no `done` para publicar referências git concretas

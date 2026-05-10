@@ -344,12 +344,14 @@ class TestSwarmIndexApply:
         assert idx.session_status["CART"] == "active"
         assert idx.session_action["CART"] == "ask AUTH"
 
-    def test_ask_doesnt_overwrite_active(self):
+    def test_ask_updates_action_keeps_status(self):
+        """Win 3: AGORA reflects the latest event, but status keeps semantics
+        (start→active, done→idle, block→blocked)."""
         idx = SwarmIndex()
         idx.apply(self._ev("CART", "T0 CART start cart-module"))
         idx.apply(self._ev("CART", "T1 CART ask AUTH como?"))
         assert idx.session_status["CART"] == "active"
-        assert idx.session_action["CART"] == "start cart-module"
+        assert idx.session_action["CART"] == "ask AUTH"
 
     def test_ask_with_spec_registers_msg_target(self):
         idx = SwarmIndex()
@@ -394,19 +396,21 @@ class TestSwarmIndexApply:
         idx.apply(self._ev("AUTH", "T0 AUTH log recebido ack:msg/CART-001.md"))
         assert "AUTH" in idx.msg_acks["msg/CART-001.md"]
 
-    def test_log_doesnt_overwrite_active(self):
+    def test_log_updates_action_keeps_status(self):
+        """Win 3: AGORA = last event regardless of verb. Status semantics
+        are preserved (start→active stays active across log)."""
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH start login"))
         idx.apply(self._ev("AUTH", "T1 AUTH log progress"))
         assert idx.session_status["AUTH"] == "active"
-        assert idx.session_action["AUTH"] == "start login"
+        assert idx.session_action["AUTH"] == "private progress"
 
     def test_note_backward_compat(self):
-        """note verb still works as alias for log."""
+        """note verb still works as alias for the canonical `private` verb."""
         idx = SwarmIndex()
         idx.apply(self._ev("AUTH", "T0 AUTH note observacao"))
         assert idx.session_status["AUTH"] == "active"
-        assert idx.session_action["AUTH"] == "log observacao"
+        assert idx.session_action["AUTH"] == "private observacao"
 
 
 # ============================================================
@@ -2688,6 +2692,475 @@ class TestChannelFiltering:
         view_b = render_view(idx, "B")
         assert "api" in view_b
         assert "v1" in view_b
+
+
+# ============================================================
+# Win 3 — AGORA reflects last event regardless of verb
+# ============================================================
+
+class TestAgoraLastEvent:
+    """The view's "AGORA" line must show the most recent action of the
+    session, no matter the verb. Previously start/done/block were the only
+    overrides, leaving AGORA stuck on the first action while the session
+    continued working."""
+
+    def _ev(self, session, line):
+        return parse_event(session, line)
+
+    def test_say_after_start_updates_action(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("FRONT", "T0 FRONT start ui"))
+        idx.apply(self._ev("FRONT", "T1 FRONT say hello-swarm"))
+        assert idx.session_action["FRONT"] == "say hello-swarm"
+        assert idx.session_status["FRONT"] == "active"
+
+    def test_ask_after_start_updates_action(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("CART", "T0 CART start cart-module"))
+        idx.apply(self._ev("CART", "T1 CART ask AUTH como?"))
+        assert idx.session_action["CART"] == "ask AUTH"
+
+    def test_reply_after_start_updates_action(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("AUTH", "T0 AUTH start login"))
+        idx.apply(self._ev("CART", "T1 CART ask AUTH como?"))
+        idx.apply(self._ev("AUTH", "T2 AUTH reply CART aqui"))
+        assert idx.session_action["AUTH"] == "reply CART"
+
+    def test_private_after_start_updates_action(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("BACK", "T0 BACK start api"))
+        idx.apply(self._ev("BACK", "T1 BACK private thinking-aloud"))
+        assert idx.session_action["BACK"] == "private thinking-aloud"
+
+    def test_log_alias_renders_as_private(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("BACK", "T0 BACK log ack ack:msg/X-001.md"))
+        assert idx.session_action["BACK"].startswith("private ")
+
+    def test_blocked_status_persists_across_logs(self):
+        """Status=blocked is sticky — only start/done change it.
+        AGORA still updates to last event."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("X", "T0 X block waiting-for-y"))
+        idx.apply(self._ev("X", "T1 X log thinking"))
+        assert idx.session_status["X"] == "blocked"  # still blocked
+        # but AGORA reflects the latest event
+        assert idx.session_action["X"].startswith("private ")
+
+    def test_view_renders_latest_action(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("FRONT", "T0 FRONT say online"))
+        idx.apply(self._ev("FRONT", "T1 FRONT up dev-server addr:http://localhost:3000"))
+        idx.apply(self._ev("FRONT", "T2 FRONT log debugging"))
+        view = render_view(idx, "FRONT")
+        # AGORA section should reflect the most recent verb (private),
+        # not the say or up that came before.
+        agora_section = view.split("## AGORA")[1].split("##")[0]
+        assert "private" in agora_section
+        assert "say online" not in agora_section
+
+
+# ============================================================
+# Win 2a — `up <recurso>` clears matching `need` blockers
+# ============================================================
+
+class TestUpClearsNeedBlocker:
+    def _ev(self, session, line):
+        return parse_event(session, line)
+
+    def test_up_resource_clears_need_with_shared_token(self):
+        """The F3 case: need backend-up-em-214-8080 + up backend → unblocked."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E need backend-up-em-214-8080"))
+        assert idx.blockers_for("E2E") == ["backend-up-em-214-8080"]
+        idx.apply(self._ev("BACK", "T1 BACK up backend addr:http://192.168.0.214:8080"))
+        assert idx.blockers_for("E2E") == []
+
+    def test_up_distinct_resource_does_not_clear_need(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E need frontend-ready"))
+        idx.apply(self._ev("BACK", "T1 BACK up backend addr:x"))
+        # No shared token between {frontend, ready} and {backend} → still blocked
+        assert idx.blockers_for("E2E") == ["frontend-ready"]
+
+    def test_down_resource_does_not_satisfy_need(self):
+        """A DOWN resource cannot satisfy a need. It's the UP transition that
+        unblocks; once it goes back DOWN the blocker should reappear."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E need backend"))
+        idx.apply(self._ev("BACK", "T1 BACK up backend addr:x"))
+        assert idx.blockers_for("E2E") == []
+        idx.apply(self._ev("BACK", "T2 BACK down backend"))
+        assert idx.blockers_for("E2E") == ["backend"]
+
+    def test_up_multiword_resource_matches_hyphen_token(self):
+        """Resources can be multi-word: `up container iam-db`. A `need iam-db`
+        from another session should match by sharing the iam-db token."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E need iam-db"))
+        idx.apply(self._ev("OPS", "T1 OPS up container iam-db addr:postgres://x"))
+        assert idx.blockers_for("E2E") == []
+
+    def test_existing_provides_match_still_works(self):
+        """The original satisfied() path (artifact in provides) must keep working."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("BACK", "T0 BACK done auth-api ref:v1"))
+        idx.apply(self._ev("FRONT", "T1 FRONT need auth-api"))
+        assert idx.blockers_for("FRONT") == []
+
+
+# ============================================================
+# Win 2b — reply with mismatched re: still closes pending ask
+# ============================================================
+
+class TestReplyFallbackOnReMismatch:
+    """F3 reported: ask spec:msg/E2E-001 → reply re:msg/E2E-001 (asker's id)
+    failed to close the question because the daemon expected re: to match the
+    question's spec id. The daemon now falls back to (asker, replier) pairing
+    when re: doesn't match anything."""
+
+    def _ev(self, session, line):
+        return parse_event(session, line)
+
+    def test_re_pointing_to_unknown_spec_falls_back_to_pairing(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK qual-addr spec:msg/E2E-001.md"))
+        # Reply uses re:msg/E2E-001 (the asker's msg id) — does NOT match the
+        # question's spec id, but must still close the pending ask.
+        idx.apply(self._ev("BACK", "T1 BACK reply E2E em-8080 re:msg/E2E-001.md"))
+        # No pending question between E2E and BACK from this ask
+        unanswered = [
+            (frm, to) for ts, frm, to, _ in idx.questions
+            if (frm, to, ts) not in idx.resolved_questions
+        ]
+        assert ("E2E", "BACK") not in unanswered
+
+    def test_re_matching_correct_spec_still_works(self):
+        """When re: points to the question's spec, original behavior preserved."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK help spec:msg/QUESTION-001.md"))
+        idx.apply(self._ev("BACK", "T1 BACK reply E2E here re:msg/QUESTION-001.md"))
+        unanswered = [
+            (frm, to) for ts, frm, to, _ in idx.questions
+            if (frm, to, ts) not in idx.resolved_questions
+        ]
+        assert ("E2E", "BACK") not in unanswered
+
+    def test_reply_without_re_resolves_pairing_unchanged(self):
+        """Pre-existing fallback path stays untouched."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK help"))
+        idx.apply(self._ev("BACK", "T1 BACK reply E2E here"))
+        unanswered = [
+            (frm, to) for ts, frm, to, _ in idx.questions
+            if (frm, to, ts) not in idx.resolved_questions
+        ]
+        assert ("E2E", "BACK") not in unanswered
+
+    def test_re_takes_precedence_over_fallback(self):
+        """When re: DOES match an existing question (even from a different asker),
+        it wins. The pairing fallback only fires if re: matched nothing."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("ALICE", "T0 ALICE ask BACK help spec:msg/ALICE-001.md"))
+        idx.apply(self._ev("BOB", "T1 BOB ask BACK other-help spec:msg/BOB-001.md"))
+        # BACK replies to BOB but accidentally puts re:msg/ALICE-001
+        idx.apply(self._ev("BACK", "T2 BACK reply BOB sure re:msg/ALICE-001.md"))
+        # ALICE's question gets closed (re: matched her spec id).
+        # BOB's question stays open — re: succeeded, so the safety fallback
+        # didn't fire. This is the conservative choice: an explicit re:
+        # that matches something is honored over the implicit pairing.
+        assert ("ALICE", "BACK", "T0") in idx.resolved_questions
+        assert ("BOB", "BACK", "T1") not in idx.resolved_questions
+
+
+# ============================================================
+# Win 1 — lint warnings on wrong-verb usage
+# ============================================================
+
+class TestLintWrongVerb:
+    """Silent semantic misses — `reply` without a pending ask, or `private`
+    while a peer is waiting on you — were the most-corroborated pain across
+    feedbacks (4/5 sessions). The daemon now emits lint warnings on these."""
+
+    def _ev(self, session, line):
+        return parse_event(session, line)
+
+    def test_reply_without_pending_ask_warns(self):
+        idx = SwarmIndex()
+        ev = self._ev("BACK", "T0 BACK reply E2E em-8080")
+        warnings = idx.lint_event(ev)
+        assert len(warnings) == 1
+        assert "no pending ask from E2E" in warnings[0]
+
+    def test_reply_with_pending_ask_no_warning(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK qual-addr"))
+        ev = self._ev("BACK", "T1 BACK reply E2E em-8080")
+        warnings = idx.lint_event(ev)
+        assert warnings == []
+
+    def test_reply_with_resolved_ask_warns(self):
+        """Once an ask is resolved, a fresh reply with no new ask should warn."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK qual-addr"))
+        idx.apply(self._ev("BACK", "T1 BACK reply E2E em-8080"))
+        # Try to reply again without a new ask
+        ev = self._ev("BACK", "T2 BACK reply E2E mais-info")
+        warnings = idx.lint_event(ev)
+        assert len(warnings) == 1
+        assert "no pending ask from E2E" in warnings[0]
+
+    def test_private_with_pending_ask_warns(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK qual-addr"))
+        ev = self._ev("BACK", "T1 BACK private thinking-aloud")
+        warnings = idx.lint_event(ev)
+        assert len(warnings) == 1
+        assert "pending ask(s) from E2E" in warnings[0]
+        assert "reply" in warnings[0]
+
+    def test_log_alias_with_pending_ask_warns(self):
+        """log is the deprecated alias of private — same lint applies."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK qual-addr"))
+        ev = self._ev("BACK", "T1 BACK log thinking-aloud")
+        warnings = idx.lint_event(ev)
+        assert len(warnings) == 1
+        assert "log:" in warnings[0]
+
+    def test_note_alias_with_pending_ask_warns(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask BACK qual-addr"))
+        ev = self._ev("BACK", "T1 BACK note observacao")
+        warnings = idx.lint_event(ev)
+        assert len(warnings) == 1
+        assert "note:" in warnings[0]
+
+    def test_private_without_pending_ask_no_warning(self):
+        idx = SwarmIndex()
+        ev = self._ev("BACK", "T0 BACK private free-thoughts")
+        assert idx.lint_event(ev) == []
+
+    def test_private_with_pending_ask_from_other_session_no_warning(self):
+        """Lint is per-recipient: pending asks aimed at someone else don't
+        flag this session's private events."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask AUTH whatever"))
+        ev = self._ev("BACK", "T1 BACK private thinking")
+        assert idx.lint_event(ev) == []
+
+    def test_private_lists_multiple_pending_askers(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("ALICE", "T0 ALICE ask BACK q1"))
+        idx.apply(self._ev("CAROL", "T1 CAROL ask BACK q2"))
+        ev = self._ev("BACK", "T2 BACK private musing")
+        warnings = idx.lint_event(ev)
+        assert len(warnings) == 1
+        assert "ALICE" in warnings[0] and "CAROL" in warnings[0]
+
+    def test_other_verbs_no_warning(self):
+        idx = SwarmIndex()
+        for verb_line in [
+            "T0 X start task",
+            "T0 X done task",
+            "T0 X say something",
+            "T0 X ask Y question",
+            "T0 X up backend",
+        ]:
+            ev = self._ev("X", verb_line)
+            assert idx.lint_event(ev) == [], f"verb {ev['verb']} should not warn"
+
+
+class TestLintInIngestEvents:
+    """End-to-end: warnings flow through ingest_events to the HTTP response."""
+
+    def test_ingest_returns_warnings_for_orphan_reply(self, tmp_path):
+        from mycod import Daemon
+        daemon = Daemon(tmp_path)
+        warnings = daemon.ingest_events("BACK", ["reply E2E em-8080"])
+        assert len(warnings) == 1
+        assert "no pending ask" in warnings[0]
+
+    def test_ingest_no_warnings_for_clean_event_stream(self, tmp_path):
+        from mycod import Daemon
+        daemon = Daemon(tmp_path)
+        daemon.ingest_events("E2E", ["ask BACK qual-addr"])
+        warnings = daemon.ingest_events("BACK", ["reply E2E em-8080"])
+        assert warnings == []
+
+    def test_ingest_returns_warnings_for_multiple_events(self, tmp_path):
+        from mycod import Daemon
+        daemon = Daemon(tmp_path)
+        warnings = daemon.ingest_events("BACK", [
+            "reply E2E orphan-1",
+            "private thinking",
+            "reply ALICE orphan-2",
+        ])
+        # Two reply warnings (private has nothing pending against BACK)
+        assert len(warnings) == 2
+        assert all("no pending ask" in w for w in warnings)
+
+
+class TestLintHTTPResponse:
+    """The HTTP /events endpoint surfaces warnings in the JSON response so
+    hooks/launchers can display them to the user/agent."""
+
+    def test_orphan_reply_returns_warning_in_response(self, tmp_path):
+        import json as _json
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            req = _auth_req(
+                f"http://127.0.0.1:{port}/events",
+                data=_json.dumps({"session": "BACK", "events": ["reply E2E em-8080"]}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            resp = urllib.request.urlopen(req)
+            body = _json.loads(resp.read())
+            assert body["ok"] is True
+            assert body["count"] == 1
+            assert "warnings" in body
+            assert len(body["warnings"]) == 1
+        finally:
+            server.shutdown()
+
+    def test_clean_events_return_no_warnings_field(self, tmp_path):
+        import json as _json
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            req = _auth_req(
+                f"http://127.0.0.1:{port}/events",
+                data=_json.dumps({"session": "X", "events": ["start task"]}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            resp = urllib.request.urlopen(req)
+            body = _json.loads(resp.read())
+            assert "warnings" not in body
+        finally:
+            server.shutdown()
+
+
+# ============================================================
+# Win 4 — msg/ in 1 step (inline content via /events)
+# ============================================================
+
+class TestInlineMsgs:
+    """Posting a msg/ file used to be a separate HTTP call. With Win 4 the
+    /events endpoint accepts a `msgs` map of filename→content and writes
+    each file before applying the events that may reference them."""
+
+    def _events_post(self, port, payload):
+        import json as _json
+        req = _auth_req(
+            f"http://127.0.0.1:{port}/events",
+            data=_json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        resp = urllib.request.urlopen(req)
+        return _json.loads(resp.read())
+
+    def test_inline_msg_creates_file(self, tmp_path):
+        server, port, daemon = _make_channel_server(tmp_path)
+        try:
+            body = self._events_post(port, {
+                "session": "AUTH",
+                "events": ["ask CART help spec:msg/AUTH-001.md"],
+                "msgs": {"AUTH-001.md": "## Pergunta detalhada\n\nbla bla\n"},
+            })
+            assert body["ok"] is True
+            assert body["msgs"]["AUTH-001.md"] == "created"
+            msg_file = daemon.swarm_dir / "msg" / "AUTH-001.md"
+            assert msg_file.exists()
+            assert "Pergunta detalhada" in msg_file.read_text()
+        finally:
+            server.shutdown()
+
+    def test_inline_msg_then_existing_file_rejects_overwrite(self, tmp_path):
+        server, port, daemon = _make_channel_server(tmp_path)
+        try:
+            self._events_post(port, {
+                "session": "AUTH",
+                "events": ["ask CART help spec:msg/AUTH-001.md"],
+                "msgs": {"AUTH-001.md": "v1"},
+            })
+            body = self._events_post(port, {
+                "session": "AUTH",
+                "events": ["ask CART help2 spec:msg/AUTH-001.md"],
+                "msgs": {"AUTH-001.md": "v2 OVERWRITE ATTEMPT"},
+            })
+            assert body["msgs"]["AUTH-001.md"] == "rejected: msg already exists"
+            content = (daemon.swarm_dir / "msg" / "AUTH-001.md").read_text()
+            assert content == "v1"  # not overwritten
+        finally:
+            server.shutdown()
+
+    def test_inline_msg_invalid_filename_rejected(self, tmp_path):
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            body = self._events_post(port, {
+                "session": "AUTH",
+                "events": ["start task"],
+                "msgs": {"../escape.md": "evil"},
+            })
+            assert "rejected" in body["msgs"]["../escape.md"]
+            body2 = self._events_post(port, {
+                "session": "AUTH",
+                "events": ["start task2"],
+                "msgs": {"sub/dir.md": "still evil"},
+            })
+            assert "rejected" in body2["msgs"]["sub/dir.md"]
+        finally:
+            server.shutdown()
+
+    def test_inline_msg_oversize_rejected(self, tmp_path):
+        from mycod import MSG_MAX_BYTES
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            body = self._events_post(port, {
+                "session": "AUTH",
+                "events": ["start task"],
+                "msgs": {"big.md": "A" * (MSG_MAX_BYTES + 1)},
+            })
+            assert "exceeds" in body["msgs"]["big.md"]
+        finally:
+            server.shutdown()
+
+    def test_msgs_must_be_dict(self, tmp_path):
+        import json as _json
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            req = _auth_req(
+                f"http://127.0.0.1:{port}/events",
+                data=_json.dumps({
+                    "session": "AUTH",
+                    "events": ["start task"],
+                    "msgs": ["not a dict"],
+                }).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                urllib.request.urlopen(req)
+                assert False, "expected 400"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+                err_body = _json.loads(e.read())
+                assert "msgs must be an object" in err_body["error"]
+        finally:
+            server.shutdown()
+
+    def test_no_msgs_field_unchanged_response(self, tmp_path):
+        """Backward compat: /events without msgs key works exactly as before."""
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            body = self._events_post(port, {
+                "session": "AUTH",
+                "events": ["start task"],
+            })
+            assert body["ok"] is True
+            assert body["count"] == 1
+            assert "msgs" not in body
+        finally:
+            server.shutdown()
 
 
 if __name__ == "__main__":

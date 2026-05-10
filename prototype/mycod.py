@@ -354,10 +354,10 @@ class SwarmIndex:
             msg_id = kvs.get("spec")
             if msg_id:
                 self.msg_targets[msg_id] = obj  # obj = target session
-            # Session that asks is clearly active
             if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
-                self.session_action[s] = f"ask {obj}"
+            # AGORA always reflects the latest event (Win 3).
+            self.session_action[s] = f"ask {obj}"
         elif verb == "reply":
             # reply TARGET answer — resolves pending questions from TARGET→self
             ack_id = kvs.get("ack")
@@ -369,33 +369,39 @@ class SwarmIndex:
                 self.msg_targets[spec_id] = obj  # obj = target session
             # Track reply for reply-read indicator
             self.replies.append((ev["ts"], s, obj, spec_id or ""))
-            # v1.3: re: resolves a specific question by its spec ID
+            # v1.3: re: resolves a specific question by its spec ID.
+            # Win 2: when re: doesn't match, fall back to (asker, replier) pairing
+            # so a reply still closes its open ask even if the re: pointed at the
+            # reply's own msg ID instead of the question's.
             re_id = kvs.get("re")
+            resolved = False
             if re_id:
-                self._resolve_question_by_spec(re_id, s)
-            else:
-                # Fallback: resolve all open questions from target→self
+                resolved = self._resolve_question_by_spec(re_id, s)
+            if not resolved:
                 self._resolve_questions_between(obj, s)
             if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
-                self.session_action[s] = f"reply {obj}"
+            self.session_action[s] = f"reply {obj}"
         elif verb == "say":
             # Broadcast within the event's channel(s); default channel = "global" = all.
             self.broadcasts.append((ev["ts"], s, f"{obj} {detail_text}".strip(), chans))
-            if s not in self.session_status or self.session_status[s] == "unknown":
+            if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
-                self.session_action[s] = f"say {obj}"
-        elif verb in ("note", "log"):
+            self.session_action[s] = f"say {obj}"
+        elif verb in ("note", "log", "private"):
             # v1: track ack for messages and resolve associated questions
-            # v1.2: "log" is the canonical name; "note" accepted for backward compat
+            # v1.6 (Win 1): "private" is the canonical name; "log" and "note"
+            # remain accepted aliases. The verb is intentionally invisible to
+            # peers, the rename clarifies that.
             ack_id = kvs.get("ack")
             if ack_id:
                 self.msg_acks[ack_id].add(s)
                 self.answered_specs.add(ack_id)
-            # log/note events update last-seen but don't override active/blocked
-            if s not in self.session_status or self.session_status[s] == "unknown":
+            if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
-                self.session_action[s] = f"log {obj}"
+            # AGORA reflects the latest event regardless of verb (Win 3).
+            # Display label uses the canonical name even for legacy aliases.
+            self.session_action[s] = f"private {obj}" if obj else "private"
 
     def _resolve_questions_between(self, asker: str, replier: str):
         """Mark all open questions from asker→replier as resolved.
@@ -410,20 +416,85 @@ class SwarmIndex:
                     self.msg_acks[spec_id].add(replier)
                     self.answered_specs.add(spec_id)
 
-    def _resolve_question_by_spec(self, spec_id: str, replier: str):
+    def lint_event(self, ev) -> list:
+        """Win 1: detect wrong-verb usage *before* the event is applied.
+
+        Returns a list of warning strings. Empty list means no issues.
+
+        Two checks, both mechanical (zero false positives):
+
+        a. `reply X ...` with no pending ask from X to the sender →
+           warn that this isn't actually answering anything.
+        b. `private` (or its `log`/`note` aliases) with one or more pending
+           asks targeted at the sender → suggest `reply` since the writer
+           may be answering in private mode that peers can't see.
+        """
+        warnings = []
+        s = ev["session"]
+        verb = ev["verb"]
+        obj = ev["obj"]
+
+        def _is_open(q_frm, q_to, q_ts):
+            return (q_frm, q_to, q_ts) not in self.resolved_questions
+
+        if verb == "reply" and obj:
+            has_pending = any(
+                q_frm == obj and q_to == s and _is_open(q_frm, q_to, q_ts)
+                for q_ts, q_frm, q_to, _ in self.questions
+            )
+            if not has_pending:
+                warnings.append(
+                    f"reply {obj}: no pending ask from {obj} to {s}. "
+                    f"To start a new question use `ask {obj}`; `reply` is "
+                    f"for answering an existing ask and won't appear in {obj}'s "
+                    f"PERGUNTAS PENDENTES otherwise."
+                )
+
+        if verb in ("private", "log", "note"):
+            pending_askers = sorted({
+                q_frm for q_ts, q_frm, q_to, _ in self.questions
+                if q_to == s and _is_open(q_frm, q_to, q_ts)
+            })
+            if pending_askers:
+                ask_list = ", ".join(pending_askers)
+                warnings.append(
+                    f"{verb}: peers can't see this. You have pending ask(s) "
+                    f"from {ask_list} — if you're answering, use "
+                    f"`reply <session>` instead."
+                )
+
+        return warnings
+
+    def _resolve_question_by_spec(self, spec_id: str, replier: str) -> bool:
         """Resolve a specific question identified by its spec: ID.
-        Also acks the spec message."""
+        Also acks the spec message. Returns True if a match was found."""
         for ts, frm, to, detail in self.questions:
             _, q_kvs = parse_detail_kvs(detail)
             if q_kvs.get("spec") == spec_id:
                 self.resolved_questions.add((frm, to, ts))
                 self.msg_acks[spec_id].add(replier)
                 self.answered_specs.add(spec_id)
-                return  # resolve first match only
+                return True  # resolve first match only
+        return False
 
     def satisfied(self, artifact: str) -> bool:
         for provided in self.provides.values():
             if artifact in provided:
+                return True
+        # Win 2: a `need` whose name shares a hyphen-token with an UP resource
+        # counts as satisfied. So `need backend-up-em-214-8080` auto-clears
+        # once anyone does `up backend addr:...`.
+        need_tokens = {tok for tok in artifact.split("-") if tok}
+        if not need_tokens:
+            return False
+        for resource_name, info in self.resources.items():
+            state = info.get("state", "") if isinstance(info, dict) else info
+            if state != "UP":
+                continue
+            res_tokens = set()
+            for word in resource_name.split():
+                res_tokens.update(t for t in word.split("-") if t)
+            if res_tokens & need_tokens:
                 return True
         return False
 
@@ -911,10 +982,14 @@ class Daemon:
             )
         self.render_count += 1
 
-    def ingest_events(self, session: str, event_lines: list):
+    def ingest_events(self, session: str, event_lines: list) -> list:
         """Thread-safe ingestion of events from HTTP POST.
         Persists to log file and updates index + view cache.
-        Advances the file offset so scan_once won't re-process these lines."""
+        Advances the file offset so scan_once won't re-process these lines.
+
+        Returns a list of lint warnings (Win 1) for the events ingested.
+        """
+        warnings = []
         with self.lock:
             ts = time.strftime("%Y-%m-%dT%H:%M:%S")
             log_file = self.log_dir / f"{session}.log"
@@ -922,7 +997,8 @@ class Daemon:
                 for ev_line in event_lines:
                     full_line = f"{ts} {session} {ev_line}"
                     f.write(full_line + "\n")
-                    self.process_line(session, full_line)
+                    _, ev_warnings = self._process_with_lint(session, full_line)
+                    warnings.extend(ev_warnings)
                 # Advance offset so poll loop skips what we just wrote
                 new_size = f.tell()
             if session not in self.offsets:
@@ -930,17 +1006,34 @@ class Daemon:
                 self.buffers[session] = ""
             self.offsets[session] = new_size
             self._render_to_cache()
+        return warnings
 
-    def process_line(self, session: str, line: str) -> bool:
+    def _process_with_lint(self, session: str, line: str) -> tuple:
+        """Parse, lint, then apply. Returns (changed_bool, warnings_list).
+
+        Lint must run BEFORE apply so the checks observe pre-event state
+        (e.g., a `reply` with no matching pending ask hasn't yet had its
+        question closed at lint time).
+        """
         ev = parse_event(session, line)
         if ev is None:
-            return False
+            return False, []
+        warnings = self.index.lint_event(ev)
         self.index.apply(ev)
         if self.verbose:
             now = time.strftime("%H:%M:%S")
             detail = f" {ev['detail']}" if ev["detail"] else ""
             print(f"[mycod {now}] {session}: {ev['verb']} {ev['obj']}{detail}", file=sys.stderr)
-        return True
+            for w in warnings:
+                print(f"[mycod {now}] {session}: lint: {w}", file=sys.stderr)
+        return True, warnings
+
+    def process_line(self, session: str, line: str) -> bool:
+        """Parse and apply a single log line. Returns whether state changed.
+        Used by scan_once; doesn't surface lint warnings (they only flow
+        through ingest_events for HTTP responses)."""
+        changed, _ = self._process_with_lint(session, line)
+        return changed
 
     def scan_once(self) -> bool:
         """Check all log files for new content. Returns True if state changed."""
@@ -1270,8 +1363,40 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(400, json.dumps({"ok": False, "error": "missing session or events"}),
                               content_type="application/json")
                 return
-            daemon.ingest_events(session, events)
-            self._respond(200, json.dumps({"ok": True, "count": len(events)}),
+            # Win 4: optional inline msgs, written before events are applied so
+            # any spec:msg/X.md referenced in those events finds the file in place.
+            inline_msgs = data.get("msgs") or {}
+            msg_results = {}
+            if inline_msgs:
+                if not isinstance(inline_msgs, dict):
+                    self._respond(400, json.dumps({"ok": False, "error": "msgs must be an object"}),
+                                  content_type="application/json")
+                    return
+                msg_dir = daemon.swarm_dir / "msg"
+                msg_dir.mkdir(parents=True, exist_ok=True)
+                for filename, content in inline_msgs.items():
+                    if not isinstance(filename, str) or not isinstance(content, str):
+                        msg_results[filename] = "rejected: name and body must be strings"
+                        continue
+                    if not filename or "/" in filename or ".." in filename:
+                        msg_results[filename] = "rejected: invalid filename"
+                        continue
+                    if len(content.encode("utf-8")) > MSG_MAX_BYTES:
+                        msg_results[filename] = f"rejected: payload exceeds {MSG_MAX_BYTES} bytes"
+                        continue
+                    msg_file = msg_dir / filename
+                    if msg_file.exists():
+                        msg_results[filename] = "rejected: msg already exists"
+                        continue
+                    msg_file.write_text(content)
+                    msg_results[filename] = "created"
+            warnings = daemon.ingest_events(session, events)
+            response = {"ok": True, "count": len(events)}
+            if warnings:
+                response["warnings"] = warnings
+            if msg_results:
+                response["msgs"] = msg_results
+            self._respond(200, json.dumps(response),
                           content_type="application/json")
         elif self.path.startswith("/msg/"):
             filename = self.path[5:].strip("/")

@@ -61,17 +61,31 @@ Exemplos:
 | `reply` | resposta a uma pergunta | `reply BACK resposta re:msg/BACK-005.md spec:msg/AUTH-002.md` |
 | `say` | broadcast visível para TODAS as sessões | `say deploy-em-1min` |
 | `direct` | diretiva (só DIRECTOR usa) | `direct all usar-JWT-HS256` |
-| `log` | observação interna (invisível para outros) | `log ack ack:msg/CART-001.md` |
+| `private` | observação interna (invisível para outros) | `private ack ack:msg/CART-001.md` |
 
-> `note` é aceito como alias de `log` por compatibilidade.
+> `log` e `note` são aceitos como aliases legados de `private` por compatibilidade. O daemon trata os três identicamente; `private` é o nome canônico para deixar claro que peers não veem.
 
 ### Semântica especial
 
 - **`ask`**: self-ask é rejeitado (target == sender → ignorado pelo daemon)
-- **`reply`**: resolve perguntas pendentes do target→sender. Com `re:`, resolve apenas a pergunta específica. Sem `re:`, resolve todas as pendentes do par.
+- **`reply`**: resolve perguntas pendentes do target→sender. Com `re:`, resolve apenas a pergunta específica. Se `re:` não casar com nenhuma pergunta, o daemon faz fallback automático para o pareamento (target, replier) — assim um `re:` apontando para o msg id errado ainda fecha o ask em aberto. Sem `re:`, resolve todas as pendentes do par.
 - **`say`**: aparece na seção BROADCASTS de todas as views
-- **`log`** (alias: `note`): NUNCA visível para outras sessões — só serve para registros internos e acks
+- **`private`** (aliases: `log`, `note`): NUNCA visível para outras sessões — só serve para registros internos e acks
+- **`up <recurso>`**: além de marcar o recurso UP, satisfaz qualquer `need <X>` em que `X` compartilhe um token hifenizado com o nome do recurso. Ex: `need backend-up-em-214-8080` é desbloqueado por `up backend addr:...`.
 - **`direct`**: aparece no topo de todas as views com prioridade máxima
+
+### Lint do daemon
+
+Em todo POST `/events`, o daemon checa cada evento e devolve avisos no campo `warnings:` da resposta JSON (omitido quando vazio):
+
+- `reply X ...` sem ask pendente de X → "no pending ask from X" (provavelmente você queria `ask X`)
+- `private`/`log`/`note` enquanto há ask(s) pendente(s) pra você → "did you mean reply?" (peers não veem `private`)
+
+Os avisos são informacionais — o evento é aceito mesmo assim. Hooks/launchers podem exibir os warnings ao usuário.
+
+### AGORA reflete a última ação
+
+A linha `Status: ... — <ação>` da view sempre mostra o evento mais recente da sessão, qualquer que seja o verbo. Antes só `start`/`done`/`block` atualizavam — agora `say`, `ask`, `reply`, `private`/`log` também atualizam a ação exibida (mas o status `blocked` continua persistindo até `start`/`done`).
 
 ## Convenções key:value
 
@@ -254,8 +268,8 @@ O daemon filtra eventos por sessão antes de renderizar a view:
 | `direct`, `say` | Todas as sessões |
 | `ask` endereçado a mim | Sempre visível |
 | `reply` | Só sender e target |
-| `log`/`note` com `ack:` | Só quem enviou a msg original |
-| `log`/`note` de outros | Invisível (spam filter) |
+| `private`/`log`/`note` com `ack:` | Só quem enviou a msg original |
+| `private`/`log`/`note` de outros | Invisível (spam filter) |
 | Outros eventos | Todas as sessões |
 
 Filtro atual: **all-see-all** para eventos estruturais (start, done, need, block, up, down). Preparado para filtros mais seletivos em swarms maiores.
