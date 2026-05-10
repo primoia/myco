@@ -69,11 +69,14 @@ def read_payload() -> dict:
 
 
 def session_name(payload: dict) -> str:
+    # Session names are uppercase throughout the protocol. Normalize at
+    # the hook boundary so the daemon, index, and view filters all agree
+    # regardless of what the user typed in the launcher or env.
     name = os.environ.get("MYCO_SESSION")
     if name:
-        return name
+        return name.upper()
     cwd = payload.get("cwd") or os.getcwd()
-    return Path(cwd).name or "default"
+    return (Path(cwd).name or "default").upper()
 
 
 def swarm_dir() -> Path:
@@ -131,14 +134,18 @@ def main() -> int:
     session = session_name(payload)
     debug(f"session={session}")
 
-    # Try HTTP first, fall back to filesystem
-    rendered = fetch_view_http(session)
-    if not rendered:
+    # When MYCO_URL is set, the daemon is authoritative. An empty response
+    # (daemon silent, auth rejected, session has nothing yet) means "inject
+    # nothing" — falling back to a local swarm dir would mix an unrelated
+    # swarm's state into this session's view.
+    if os.environ.get("MYCO_URL"):
+        rendered = fetch_view_http(session)
+    else:
         sd = swarm_dir()
         if not sd.is_dir():
-            debug(f"swarm dir does not exist: {sd}")
+            debug(f"no MYCO_URL and swarm dir does not exist: {sd}")
             return 0
-        debug(f"using filesystem: swarm={sd}")
+        debug(f"no MYCO_URL, using filesystem: swarm={sd}")
         rendered = render_view_for_session(sd, session)
 
     if not rendered:

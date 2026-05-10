@@ -52,23 +52,25 @@ Exemplos:
 | Verbo | Significado | Exemplo |
 |---|---|---|
 | `start` | comecei a trabalhar em X | `start login.endpoint` |
-| `done` | terminei X, efeito publicado | `done auth.v2 ref:origin/feat/new-auth` |
+| `done` | terminei X, efeito publicado | `done auth.v2 result:ok ref:origin/feat/new-auth` |
 | `need` | declaro dependência (precondição) | `need AUTH.auth.v2` |
 | `block` | estou bloqueado | `block esperando-deploy-do-db` |
-| `up` | recurso subiu | `up container iam-db` |
+| `up` | recurso subiu (suporta `addr:`) | `up dev-server addr:http://192.168.0.214:7777` |
 | `down` | recurso caiu | `down endpoint /api/auth` |
 | `ask` | pergunta dirigida a outra sessão | `ask DIRECTOR preciso-de-specs` |
-| `reply` | resposta a uma pergunta | `reply BACK resposta spec:msg/AUTH-002.md` |
+| `reply` | resposta a uma pergunta | `reply BACK resposta re:msg/BACK-005.md spec:msg/AUTH-002.md` |
 | `say` | broadcast visível para TODAS as sessões | `say deploy-em-1min` |
 | `direct` | diretiva (só DIRECTOR usa) | `direct all usar-JWT-HS256` |
-| `note` | observação interna (invisível para outros) | `note ack ack:msg/CART-001.md` |
+| `log` | observação interna (invisível para outros) | `log ack ack:msg/CART-001.md` |
+
+> `note` é aceito como alias de `log` por compatibilidade.
 
 ### Semântica especial
 
 - **`ask`**: self-ask é rejeitado (target == sender → ignorado pelo daemon)
-- **`reply`**: resolve perguntas pendentes do target→sender e faz auto-ack de specs associados
+- **`reply`**: resolve perguntas pendentes do target→sender. Com `re:`, resolve apenas a pergunta específica. Sem `re:`, resolve todas as pendentes do par.
 - **`say`**: aparece na seção BROADCASTS de todas as views
-- **`note`**: NUNCA visível para outras sessões — só serve para registros internos e acks
+- **`log`** (alias: `note`): NUNCA visível para outras sessões — só serve para registros internos e acks
 - **`direct`**: aparece no topo de todas as views com prioridade máxima
 
 ## Convenções key:value
@@ -80,12 +82,43 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
 | `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
+| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
+| `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
+| `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
+| `channel:` | canal(is) de visibilidade; padrão `global`; lista por vírgula | `channel:review-42` / `channel:sec,ops` |
 
 Exemplo completo:
 
 ```
-done auth-api-v2 ref:origin/feat/new-login spec:msg/AUTH-003.md
+done auth-api-v2 result:ok ref:origin/feat/new-login spec:msg/AUTH-003.md
+reply FRONT resposta re:msg/FRONT-010.md spec:msg/DIRECTOR-005.md
 ```
+
+## Canais de visibilidade (`channel:`)
+
+Por padrão todo evento é swarm-wide — aparece para qualquer sessão. Para isolar uma conversa (ex: code review, incidente, spike), qualquer evento pode carregar `channel:<nome>`. Sessões não pertencentes ao canal não veem o evento.
+
+**Membresia implícita:** uma sessão torna-se membro de um canal quando (a) emite um evento com `channel:X`, ou (b) é alvo direto de um `ask`/`reply`/`direct` com `channel:X`. `global` é o canal default — toda sessão sempre é membra.
+
+**Múltiplos canais no mesmo evento:** `channel:a,b` é visível a membros de `a` OU `b`.
+
+**Escopo do filtro (A1):** aplica-se a eventos em `## EVENTOS RELEVANTES` e a `say` em `## BROADCASTS`. Artefatos, recursos, diretivas e PEERS continuam swarm-wide.
+
+Exemplo:
+
+```
+ask REVIEWER revise-diff channel:review-42 spec:msg/FRONT-020.md
+reply FRONT ok channel:review-42 re:msg/FRONT-020.md
+say incidente-em-curso channel:sec
+```
+
+## Convenções de slug
+
+O campo `<objeto>` nos verbos deve ser curto e legível:
+
+- **Máximo 6 palavras hifenizadas** (ex: `login-endpoint`, `auth-api-v2`, `db-migration-users`)
+- Detalhes longos vão em `spec:msg/` — não no objeto
+- Evitar handles como `servidor-nao-alcancavel-do-meu-sandbox-localhost-7777` — use `servidor-inalcancavel` e detalhe em spec
 
 ## Mensagens ricas (msg/)
 
@@ -167,9 +200,9 @@ Nenhum bloqueador conhecido.
 - [2026-04-14T10:23:45] usar-JWT-HS256
 
 ## ARTEFATOS PUBLICADOS
-| sessão | artefato | ref | path | spec |
-|---|---|---|---|---|
-| AUTH | auth.v2 | origin/feat/new-auth | /home/user/auth | — |
+| sessão | artefato | ref | result | path | spec |
+|---|---|---|---|---|---|
+| AUTH | auth.v2 | origin/feat/new-auth | ok | /home/user/auth | — |
 
 ## SEUS BLOQUEADORES
 Nenhum.
@@ -185,9 +218,9 @@ Nenhum.
 - **AUTH**: idle, last-seen 12s
 
 ## RECURSOS COMPARTILHADOS
-| recurso | estado |
-|---|---|
-| container iam-db | UP |
+| recurso | estado | endereço |
+|---|---|---|
+| container iam-db | UP | — |
 
 ## EVENTOS RELEVANTES (últimos 15)
 ...
@@ -221,8 +254,8 @@ O daemon filtra eventos por sessão antes de renderizar a view:
 | `direct`, `say` | Todas as sessões |
 | `ask` endereçado a mim | Sempre visível |
 | `reply` | Só sender e target |
-| `note` com `ack:` | Só quem enviou a msg original |
-| `note` de outros | Invisível (spam filter) |
+| `log`/`note` com `ack:` | Só quem enviou a msg original |
+| `log`/`note` de outros | Invisível (spam filter) |
 | Outros eventos | Todas as sessões |
 
 Filtro atual: **all-see-all** para eventos estruturais (start, done, need, block, up, down). Preparado para filtros mais seletivos em swarms maiores.
@@ -241,6 +274,19 @@ Filtro atual: **all-see-all** para eventos estruturais (start, done, need, block
 │ 8. Próximo prompt de qualquer sessão recebe view fresca   │
 └──────────────────────────────────────────────────────────┘
 ```
+
+## Padrões recomendados
+
+Padrões que emergiram em uso real e são recomendados:
+
+### Contrato versionado via msg/
+Use `msg/SESSAO-NNN.md` como fonte de verdade congelada por versão. Exemplo: `BACK-010.md` = v1 da API, `BACK-014.md` = v1.1. Cada mensagem é imutável — funciona como snapshot de contrato.
+
+### Ciclo draft→review→freeze→impl
+Uma sessão propõe spec (draft), outra revisa e ajusta (review), congelam a versão final (freeze), implementam em paralelo (impl). Fluxo natural para negociação de contratos HTTP/API.
+
+### Smoke script como artefato reusável
+Sessão consumidora mantém um script de testes (`smoke.sh`) que roda contra cada versão do serviço parceiro. Custo baixo, valor alto para regressão.
 
 ## Versionamento
 

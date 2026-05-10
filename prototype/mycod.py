@@ -16,8 +16,22 @@ The swarm directory must contain:
     view/   - per-session curated views (written by daemon)
 
 Protocol v1. See docs/PROTOCOL.md for the event format.
+
+Tenant model (v1.5, renamed in v1.6):
+    Every request is authenticated by a Bearer token. The token's SHA256
+    hash identifies the tenant. Tenants are completely isolated — no
+    cross-tenant visibility. Requests without a valid token are rejected.
+    A session is auto-registered on the first GET /view/<session>, so
+    consumers can read their view without needing to publish first.
+
+    Terminology: this was called "channel" in v1.4/v1.5. The word is
+    now reserved for the `channel:<name>` kv on events (topic-level
+    visibility inside a tenant). Legacy names (`--multi-channel`,
+    `[channel-mgr]` logs, `mode: "multi-channel"`, on-disk `channels/`)
+    remain accepted as aliases; disk layout migrates automatically.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -29,6 +43,114 @@ from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+
+# ---------- Security: token validation and rate limiting ----------
+
+MIN_TOKEN_LENGTH = 32
+MIN_TOKEN_ENTROPY_BITS = 80  # roughly 16 random chars
+
+
+def _token_to_tenant_id(token: str) -> str:
+    """Hash token to tenant identifier. Uses SHA256 for isolation."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _estimate_entropy(s: str) -> float:
+    """Estimate Shannon entropy of a string in bits."""
+    from math import log2
+    if not s:
+        return 0.0
+    freq = defaultdict(int)
+    for c in s:
+        freq[c] += 1
+    entropy = 0.0
+    for count in freq.values():
+        p = count / len(s)
+        entropy -= p * log2(p)
+    return entropy * len(s)
+
+
+def _validate_token_strength(token: str) -> tuple[bool, str]:
+    """Check if token meets minimum security requirements.
+    Returns (valid, error_message).
+
+    Requirements:
+    - At least MIN_TOKEN_LENGTH characters
+    - Minimum entropy (prevents '00000000000000000000000000000000')
+    - No obvious patterns
+    """
+    if len(token) < MIN_TOKEN_LENGTH:
+        return False, f"token too short (min {MIN_TOKEN_LENGTH} chars)"
+
+    entropy = _estimate_entropy(token)
+    if entropy < MIN_TOKEN_ENTROPY_BITS:
+        return False, f"token too weak (low entropy: {entropy:.1f} < {MIN_TOKEN_ENTROPY_BITS} bits)"
+
+    # Check for obvious patterns
+    if token == token[0] * len(token):
+        return False, "token is all same character"
+
+    return True, ""
+
+
+class RateLimiter:
+    """Simple rate limiter to prevent brute-force token guessing.
+
+    Tracks failed auth attempts per IP. After N failures in a time window,
+    reject all requests from that IP for a cooldown period.
+    """
+
+    def __init__(self, max_failures=5, window_seconds=60, cooldown_seconds=300):
+        self.max_failures = max_failures
+        self.window_seconds = window_seconds
+        self.cooldown_seconds = cooldown_seconds
+        self.failures = defaultdict(list)  # ip -> [timestamps]
+        self.banned_until = {}  # ip -> timestamp
+        self.lock = threading.Lock()
+
+    def is_allowed(self, ip: str) -> tuple[bool, str]:
+        """Check if IP is allowed to make auth attempts.
+        Returns (allowed, reason)."""
+        with self.lock:
+            now = time.time()
+
+            # Check if banned
+            if ip in self.banned_until:
+                if now < self.banned_until[ip]:
+                    remaining = int(self.banned_until[ip] - now)
+                    return False, f"too many failed attempts, retry in {remaining}s"
+                else:
+                    del self.banned_until[ip]
+                    self.failures[ip] = []
+
+            return True, ""
+
+    def record_failure(self, ip: str):
+        """Record a failed auth attempt."""
+        with self.lock:
+            now = time.time()
+
+            # Clean old failures outside window
+            self.failures[ip] = [
+                ts for ts in self.failures[ip]
+                if now - ts < self.window_seconds
+            ]
+
+            # Add new failure
+            self.failures[ip].append(now)
+
+            # Ban if too many failures
+            if len(self.failures[ip]) >= self.max_failures:
+                self.banned_until[ip] = now + self.cooldown_seconds
+
+    def record_success(self, ip: str):
+        """Record a successful auth (clears failure count)."""
+        with self.lock:
+            if ip in self.failures:
+                del self.failures[ip]
+            if ip in self.banned_until:
+                del self.banned_until[ip]
 
 
 # ---------- Message sanitization ----------
@@ -48,8 +170,13 @@ def _sanitize_msg(content: str) -> str:
 
 # ---------- Event parsing ----------
 
-_KNOWN_KV_KEYS = {"ref", "spec", "ack"}
+_KNOWN_KV_KEYS = {"ref", "spec", "ack", "addr", "result", "re", "channel"}
 _KV_RE = re.compile(r'\b([a-z]+):(\S+)')
+
+# Verbs whose obj field is another session identifier (not a resource or
+# task name). The obj gets upper-cased so `ask Worker ...` and
+# `ask WORKER ...` cannot become two distinct pending questions.
+_SESSION_TARGET_VERBS = {"ask", "reply", "direct"}
 
 
 def parse_detail_kvs(detail: str):
@@ -80,6 +207,21 @@ def parse_detail_kvs(detail: str):
     return " ".join(free_text), kvs
 
 
+GLOBAL_CHANNEL = "global"
+
+
+def event_channels(ev) -> set:
+    """Channels an event belongs to. Default: {"global"} when channel: absent.
+
+    `channel:` value is a comma-separated list of names. Empty segments ignored.
+    """
+    raw = ev.get("kvs", {}).get("channel", "")
+    if not raw:
+        return {GLOBAL_CHANNEL}
+    chans = {c for c in raw.split(",") if c}
+    return chans or {GLOBAL_CHANNEL}
+
+
 def parse_event(session: str, line: str):
     """Parse a log line into an event dict. Returns None if malformed."""
     line = line.strip()
@@ -94,6 +236,13 @@ def parse_event(session: str, line: str):
     obj = parts[3] if len(parts) > 3 else ""
     detail = parts[4] if len(parts) > 4 else ""
     detail_text, kvs = parse_detail_kvs(detail)
+    # Session names are case-insensitive at the protocol level. The single
+    # invariant maintained by the index is "every session id is uppercase",
+    # so we normalize here — both the emitter and, for session-target
+    # verbs, the obj field.
+    session = session.upper()
+    if verb in _SESSION_TARGET_VERBS:
+        obj = obj.upper()
     return {
         "ts": ts,
         "session": session,
@@ -127,7 +276,11 @@ class SwarmIndex:
         self.answered_specs = set()        # spec ids that have been acked
         self.resolved_questions = set()    # (frm, to, ts) tuples resolved by reply
         self.last_seen = {}                  # session → timestamp string
-        self.broadcasts = []                 # (ts, session, text) from say verb
+        self.broadcasts = []                 # (ts, session, text, channels) from say verb
+        self.replies = []                    # (ts, sender, target, spec) from reply verb
+        # channel membership: session → set of channels it belongs to
+        # every session is implicitly a member of "global"
+        self.session_channels = defaultdict(lambda: {GLOBAL_CHANNEL})
 
     def apply(self, ev):
         s = ev["session"]
@@ -139,6 +292,13 @@ class SwarmIndex:
         obj = ev["obj"]
         detail = ev["detail"]
         kvs = ev.get("kvs", {})
+
+        # Channel membership: author joins; targeted mention pulls target in.
+        # "global" is the implicit channel — no-op for sessions that don't opt in.
+        chans = event_channels(ev)
+        self.session_channels[s] |= chans
+        if verb in ("ask", "reply", "direct") and obj and obj not in ("all", s):
+            self.session_channels[obj] |= chans
 
         # Resource names can be multi-token: "up container iam-db"
         # We concatenate obj + detail for resource verbs
@@ -161,6 +321,7 @@ class SwarmIndex:
                 "obj": obj,
                 "ref": kvs.get("ref", ""),
                 "spec": kvs.get("spec", ""),
+                "result": kvs.get("result", ""),
             })
         elif verb == "need":
             self.needs[s].add(obj)
@@ -168,11 +329,22 @@ class SwarmIndex:
             self.session_status[s] = "blocked"
             self.session_action[s] = f"blocked: {obj} {detail_text}".strip()
         elif verb == "up":
-            self.resources[full_obj] = "UP"
+            new_addr = kvs.get("addr", "")
+            if not new_addr:
+                # Preserve existing addr on re-up without addr:
+                existing = self.resources.get(full_obj, {})
+                new_addr = existing.get("addr", "") if isinstance(existing, dict) else ""
+            self.resources[full_obj] = {"state": "UP", "addr": new_addr}
         elif verb == "down":
-            self.resources[full_obj] = "DOWN"
+            existing = self.resources.get(full_obj, {})
+            prev_addr = existing.get("addr", "") if isinstance(existing, dict) else ""
+            self.resources[full_obj] = {"state": "DOWN", "addr": prev_addr}
         elif verb == "direct":
             self.directives.append((ev["ts"], obj, detail))
+            # v1.3: re: on direct resolves a specific question
+            re_id = kvs.get("re")
+            if re_id:
+                self._resolve_question_by_spec(re_id, s)
         elif verb == "ask":
             # Ignore self-ask (target == sender) — pollutes pending questions
             if obj == s:
@@ -195,27 +367,35 @@ class SwarmIndex:
             spec_id = kvs.get("spec")
             if spec_id:
                 self.msg_targets[spec_id] = obj  # obj = target session
-            # Resolve all open questions from target→self
-            self._resolve_questions_between(obj, s)
+            # Track reply for reply-read indicator
+            self.replies.append((ev["ts"], s, obj, spec_id or ""))
+            # v1.3: re: resolves a specific question by its spec ID
+            re_id = kvs.get("re")
+            if re_id:
+                self._resolve_question_by_spec(re_id, s)
+            else:
+                # Fallback: resolve all open questions from target→self
+                self._resolve_questions_between(obj, s)
             if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
                 self.session_action[s] = f"reply {obj}"
         elif verb == "say":
-            # Broadcast visible to all sessions
-            self.broadcasts.append((ev["ts"], s, f"{obj} {detail_text}".strip()))
+            # Broadcast within the event's channel(s); default channel = "global" = all.
+            self.broadcasts.append((ev["ts"], s, f"{obj} {detail_text}".strip(), chans))
             if s not in self.session_status or self.session_status[s] == "unknown":
                 self.session_status[s] = "active"
                 self.session_action[s] = f"say {obj}"
-        elif verb == "note":
+        elif verb in ("note", "log"):
             # v1: track ack for messages and resolve associated questions
+            # v1.2: "log" is the canonical name; "note" accepted for backward compat
             ack_id = kvs.get("ack")
             if ack_id:
                 self.msg_acks[ack_id].add(s)
                 self.answered_specs.add(ack_id)
-            # note events update last-seen but don't override active/blocked
+            # log/note events update last-seen but don't override active/blocked
             if s not in self.session_status or self.session_status[s] == "unknown":
                 self.session_status[s] = "active"
-                self.session_action[s] = f"note {obj}"
+                self.session_action[s] = f"log {obj}"
 
     def _resolve_questions_between(self, asker: str, replier: str):
         """Mark all open questions from asker→replier as resolved.
@@ -229,6 +409,17 @@ class SwarmIndex:
                 if spec_id:
                     self.msg_acks[spec_id].add(replier)
                     self.answered_specs.add(spec_id)
+
+    def _resolve_question_by_spec(self, spec_id: str, replier: str):
+        """Resolve a specific question identified by its spec: ID.
+        Also acks the spec message."""
+        for ts, frm, to, detail in self.questions:
+            _, q_kvs = parse_detail_kvs(detail)
+            if q_kvs.get("spec") == spec_id:
+                self.resolved_questions.add((frm, to, ts))
+                self.msg_acks[spec_id].add(replier)
+                self.answered_specs.add(spec_id)
+                return  # resolve first match only
 
     def satisfied(self, artifact: str) -> bool:
         for provided in self.provides.values():
@@ -261,6 +452,25 @@ class SwarmIndex:
     #             detail verbs (note/ask) filtered by relationship
     #   - explicit subscription: sessions declare what they watch
 
+    def _in_channel_scope(self, ev, session: str) -> bool:
+        """True if `session` can see `ev` under channel rules.
+
+        Rules:
+          - own events: always in scope
+          - global events: always in scope
+          - direct mention (obj == session): always in scope (overrides scope)
+          - otherwise: session must share a channel with the event
+        """
+        if ev["session"] == session:
+            return True
+        ev_chans = event_channels(ev)
+        if GLOBAL_CHANNEL in ev_chans:
+            return True
+        if ev.get("obj") == session:
+            return True
+        my_chans = self.session_channels.get(session, {GLOBAL_CHANNEL})
+        return bool(ev_chans & my_chans)
+
     def _is_visible(self, ev, session: str) -> bool:
         """Decide if `ev` should appear in `session`'s view.
         Override this method to change visibility rules."""
@@ -271,7 +481,12 @@ class SwarmIndex:
         if s == session:
             return True
 
-        # Directives and broadcasts: always visible
+        # Channel scope gates everything below. Without it we'd leak
+        # events from private channels to non-members.
+        if not self._in_channel_scope(ev, session):
+            return False
+
+        # Directives and broadcasts: always visible (within channel scope)
         if verb in ("direct", "say"):
             return True
 
@@ -283,22 +498,20 @@ class SwarmIndex:
         if verb == "reply":
             return ev["obj"] == session
 
-        # Notes: filtered by type
-        if verb == "note":
+        # Notes/logs: filtered by type
+        if verb in ("note", "log"):
             if s == session:
                 return True  # already caught above, but explicit
             kvs = ev.get("kvs", {})
             ack_id = kvs.get("ack")
             if ack_id:
                 # Ack notes visible only to the session that sent the original msg
-                # msg_id like "msg/CART-001.md" → sender is "CART" (prefix before dash)
-                # But more reliably: check who asked with this spec
                 for q_ts, q_frm, q_to, q_detail in self.questions:
                     _, q_kvs = parse_detail_kvs(q_detail)
                     if q_kvs.get("spec") == ack_id and q_frm == session:
                         return True
                 return False
-            # Other notes from others: hide (spam filter)
+            # Other notes/logs from others: hide (spam filter)
             return False
 
         # All other events from other sessions: visible
@@ -379,6 +592,10 @@ def _age_label(ts_str: str) -> str:
 
 def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
                 session_dirs: dict = None) -> str:
+    # Defensive normalization: every other path normalizes to upper, but
+    # this entrypoint is public and some callers (myco_view CLI) pass
+    # user input directly.
+    session = session.upper()
     blockers = index.blockers_for(session)
     dependents = index.dependents_of(session)
     resources = dict(index.resources)
@@ -438,9 +655,12 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
     lines.append("")
 
     lines.append("## DIRETIVAS")
+    # Directive target "ALL" is the broadcast marker (uppercased by
+    # parse_event like any session name); session-specific targets match
+    # uppercased session ids.
     relevant_directives = [
         (ts, t, txt) for ts, t, txt in directives
-        if t in ("all", session)
+        if t in ("ALL", session)
     ]
     if relevant_directives:
         for ts, target, text in relevant_directives[-5:]:
@@ -449,17 +669,23 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
         lines.append("Nenhuma diretiva ativa.")
     lines.append("")
 
-    # v1: ARTEFATOS PUBLICADOS (permanent, never capped)
+    # v1.3: ARTEFATOS PUBLICADOS — dedupe by (session, obj), show latest only
     lines.append("## ARTEFATOS PUBLICADOS")
     if index.artifacts:
-        lines.append("| sessão | artefato | ref | path | spec |")
-        lines.append("|---|---|---|---|---|")
+        # Dedupe: keep last artifact per (session, obj)
+        seen = {}
         for a in index.artifacts:
+            seen[(a["session"], a["obj"])] = a
+        deduped = list(seen.values())
+        lines.append("| sessão | artefato | ref | result | path | spec |")
+        lines.append("|---|---|---|---|---|---|")
+        for a in deduped:
             s_dir = (session_dirs or {}).get(a["session"], "")
             ref = a["ref"] or "—"
+            result = a.get("result", "") or "—"
             spec = a["spec"] or "—"
             path = s_dir or "—"
-            lines.append(f"| {a['session']} | {a['obj']} | {ref} | {path} | {spec} |")
+            lines.append(f"| {a['session']} | {a['obj']} | {ref} | {result} | {path} | {spec} |")
     else:
         lines.append("Nenhum artefato publicado.")
     lines.append("")
@@ -518,10 +744,15 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
             lines.append("Nenhum conflito detectado.")
         lines.append("")
 
-    # BROADCASTS (say verb)
-    if index.broadcasts:
+    # BROADCASTS (say verb) — respect channel scope
+    my_chans = index.session_channels.get(session, {GLOBAL_CHANNEL})
+    visible_bcasts = [
+        (ts, sender, text) for ts, sender, text, chans in index.broadcasts[-50:]
+        if sender == session or GLOBAL_CHANNEL in chans or (chans & my_chans)
+    ][-5:]
+    if visible_bcasts:
         lines.append("## BROADCASTS")
-        for ts, sender, text in index.broadcasts[-5:]:
+        for ts, sender, text in visible_bcasts:
             lines.append(f"- [{ts}] **{sender}**: {text}")
         lines.append("")
 
@@ -534,15 +765,35 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
                 ls_ts = index.last_seen.get(p)
                 ls = _age_label(ls_ts) if ls_ts else "—"
                 st = index.session_status.get(p, "unknown")
-                lines.append(f"- **{p}**: {st}, last-seen {ls}")
+                # Reply-read indicator: check if last reply from us to this peer
+                # has been acked (spec consumed)
+                reply_tag = ""
+                last_reply_to_peer = None
+                for r_ts, r_sender, r_target, r_spec in reversed(index.replies):
+                    if r_sender == session and r_target == p:
+                        last_reply_to_peer = (r_ts, r_spec)
+                        break
+                if last_reply_to_peer:
+                    r_ts, r_spec = last_reply_to_peer
+                    if r_spec and r_spec in index.answered_specs:
+                        reply_tag = " (reply lido)"
+                    elif r_spec:
+                        reply_tag = " (reply pendente)"
+                lines.append(f"- **{p}**: {st}, last-seen {ls}{reply_tag}")
             lines.append("")
 
     lines.append("## RECURSOS COMPARTILHADOS")
     if resources:
-        lines.append("| recurso | estado |")
-        lines.append("|---|---|")
-        for r, state in sorted(resources.items()):
-            lines.append(f"| {r} | {state} |")
+        lines.append("| recurso | estado | endereço |")
+        lines.append("|---|---|---|")
+        for r, info in sorted(resources.items()):
+            if isinstance(info, dict):
+                state = info["state"]
+                addr = info.get("addr", "") or "—"
+            else:
+                state = info
+                addr = "—"
+            lines.append(f"| {r} | {state} | {addr} |")
     else:
         lines.append("Nenhum recurso registrado.")
     lines.append("")
@@ -735,110 +986,235 @@ class Daemon:
 
         return changed
 
-    def run(self, port: int = 0):
-        # Initial setup: ensure DIRECTOR exists, replay logs, render
-        (self.log_dir / "DIRECTOR.log").touch(exist_ok=True)
-        self.index.sessions_known.add("DIRECTOR")
-        self.scan_once()
-        self.render_all()
+    # Daemon is always driven by ChannelManager.poll_all() now; it does
+    # not run standalone.
 
-        if port:
-            self._run_http(port)
-        else:
-            self._run_poll()
 
-    def _run_http(self, port: int):
-        server = MycoHTTPServer(("", port), MycoHandler, self)
-        print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
-        print(f"[mycod] swarm dir: {self.swarm_dir}", file=sys.stderr)
-        # Run HTTP server in a background thread so we can poll logs too
-        http_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        http_thread.start()
-        print(f"[mycod] polling {self.log_dir} (hybrid mode: HTTP + filesystem)", file=sys.stderr)
-        try:
-            while True:
-                changed = False
-                with self.lock:
-                    changed = self.scan_once()
-                    if changed:
-                        self._render_to_cache()
-                        # Also write to filesystem for local readers
-                        sessions = set(self.index.sessions_known) | {"DIRECTOR"}
-                        for s in sessions:
-                            content = self.view_cache.get(s, "")
-                            if content:
-                                write_view_atomic(self.view_dir / f"{s}.md", content)
-                        if self.verbose:
-                            now = time.strftime("%H:%M:%S")
-                            slist = sorted(self.index.sessions_known)
-                            print(f"[mycod {now}] rendered {len(slist)} views ({', '.join(slist)})", file=sys.stderr)
-                time.sleep(self.POLL_INTERVAL_SEC)
-        except KeyboardInterrupt:
-            server.shutdown()
 
-    def _run_poll(self):
-        print(f"[mycod] watching {self.log_dir}", file=sys.stderr)
-        print(f"[mycod] writing to {self.view_dir}", file=sys.stderr)
-        print(f"[mycod] poll interval: {self.POLL_INTERVAL_SEC*1000:.1f}ms", file=sys.stderr)
+# ---------- Multi-tenant support ----------
 
-        try:
-            while True:
-                if self.scan_once():
-                    self.render_all()
+class TenantManager:
+    """Manages multiple isolated tenants, one per unique token.
+
+    Each tenant is a completely isolated Daemon instance with its own
+    log/, view/, msg/ directories. Tenants are identified by SHA256(token).
+
+    Security features:
+    - Token strength validation (min length, entropy)
+    - Rate limiting per IP to prevent brute-force
+    - Zero cross-tenant visibility
+    """
+
+    def __init__(self, base_dir: Path, verbose: bool = False):
+        self.base_dir = base_dir
+        self.verbose = verbose
+
+        # Migrate legacy on-disk layout: channels/ → tenants/. Idempotent —
+        # only renames when the old path exists and the new one doesn't.
+        legacy_dir = base_dir / "channels"
+        self.tenants_dir = base_dir / "tenants"
+        if legacy_dir.is_dir() and not self.tenants_dir.exists():
+            os.rename(legacy_dir, self.tenants_dir)
+            if verbose:
+                print(f"[tenant-mgr] migrated {legacy_dir} → {self.tenants_dir}",
+                      file=sys.stderr)
+        self.tenants_dir.mkdir(parents=True, exist_ok=True)
+
+        # tenant_id -> Daemon instance
+        self.daemons = {}
+        self.lock = threading.Lock()
+
+        # Rate limiting
+        self.rate_limiter = RateLimiter(
+            max_failures=5,
+            window_seconds=60,
+            cooldown_seconds=300,
+        )
+
+        # Reload existing tenants from disk
+        self._reload_tenants()
+
+    def _reload_tenants(self):
+        """Scan tenants/ directory and initialize Daemon for each existing tenant."""
+        for tenant_dir in self.tenants_dir.iterdir():
+            if not tenant_dir.is_dir():
+                continue
+            tenant_id = tenant_dir.name
+            if tenant_id not in self.daemons:
+                try:
+                    daemon = Daemon(tenant_dir, verbose=self.verbose)
+                    # Initialize: ensure DIRECTOR exists, replay logs
+                    (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
+                    daemon.index.sessions_known.add("DIRECTOR")
+                    daemon.scan_once()
+                    daemon._render_to_cache()
+                    self.daemons[tenant_id] = daemon
                     if self.verbose:
-                        now = time.strftime("%H:%M:%S")
-                        sessions = sorted(self.index.sessions_known)
-                        print(f"[mycod {now}] rendered {len(sessions)} views ({', '.join(sessions)})", file=sys.stderr)
-                time.sleep(self.POLL_INTERVAL_SEC)
-        except KeyboardInterrupt:
-            pass
+                        print(f"[tenant-mgr] loaded tenant {tenant_id[:8]}...", file=sys.stderr)
+                except Exception as e:
+                    print(f"[tenant-mgr] failed to load tenant {tenant_id}: {e}", file=sys.stderr)
 
+    def authenticate(self, token: str, client_ip: str, allow_create: bool = True) -> tuple[Daemon | None, str]:
+        """Authenticate token and return the corresponding Daemon.
+
+        Args:
+            token: The auth token
+            client_ip: Client IP for rate limiting
+            allow_create: If True, create new tenant for valid new tokens
+
+        Returns:
+            (daemon, error_message)
+            daemon is None if auth failed.
+        """
+        # Rate limit check
+        allowed, reason = self.rate_limiter.is_allowed(client_ip)
+        if not allowed:
+            return None, reason
+
+        # Empty token → reject
+        if not token:
+            self.rate_limiter.record_failure(client_ip)
+            return None, "missing token"
+
+        tenant_id = _token_to_tenant_id(token)
+        tenant_dir = self.tenants_dir / tenant_id
+
+        # Existing tenant: grant access
+        if tenant_id in self.daemons:
+            self.rate_limiter.record_success(client_ip)
+            return self.daemons[tenant_id], ""
+
+        # New tenant: validate token strength before creating
+        if not allow_create:
+            self.rate_limiter.record_failure(client_ip)
+            return None, "tenant does not exist"
+
+        valid, err = _validate_token_strength(token)
+        if not valid:
+            self.rate_limiter.record_failure(client_ip)
+            return None, f"token rejected: {err}"
+
+        # Create new tenant
+        with self.lock:
+            # Double-check (another thread might have created it)
+            if tenant_id in self.daemons:
+                self.rate_limiter.record_success(client_ip)
+                return self.daemons[tenant_id], ""
+
+            try:
+                tenant_dir.mkdir(parents=True, exist_ok=True)
+                daemon = Daemon(tenant_dir, verbose=self.verbose)
+                # Initialize
+                (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
+                daemon.index.sessions_known.add("DIRECTOR")
+                daemon.scan_once()
+                daemon._render_to_cache()
+                self.daemons[tenant_id] = daemon
+
+                if self.verbose:
+                    print(f"[tenant-mgr] created tenant {tenant_id[:8]}... (token validated)", file=sys.stderr)
+
+                self.rate_limiter.record_success(client_ip)
+                return daemon, ""
+
+            except Exception as e:
+                self.rate_limiter.record_failure(client_ip)
+                return None, f"failed to create tenant: {e}"
+
+    def poll_all(self):
+        """Poll all active tenants for new events."""
+        with self.lock:
+            for tenant_id, daemon in list(self.daemons.items()):
+                try:
+                    changed = daemon.scan_once()
+                    if changed:
+                        daemon._render_to_cache()
+                        # Also write to filesystem for local readers
+                        sessions = set(daemon.index.sessions_known) | {"DIRECTOR"}
+                        for s in sessions:
+                            content = daemon.view_cache.get(s, "")
+                            if content:
+                                write_view_atomic(daemon.view_dir / f"{s}.md", content)
+                except Exception as e:
+                    if self.verbose:
+                        print(f"[tenant-mgr] error polling {tenant_id[:8]}...: {e}", file=sys.stderr)
+
+
+# Backwards-compatible alias — code/tests that import ChannelManager still work.
+ChannelManager = TenantManager
 
 
 # ---------- HTTP server ----------
 
 class MycoHTTPServer(ThreadingHTTPServer):
-    """HTTP server that holds a reference to the Daemon instance."""
+    """HTTP server backed by a TenantManager.
 
-    def __init__(self, server_address, handler_class, daemon: Daemon):
-        self.daemon_ref = daemon  # avoid shadowing socketserver.BaseServer.daemon
-        self.auth_token = os.environ.get("MYCO_TOKEN", "")
+    Every request is authenticated by a Bearer token whose SHA256 is the
+    tenant identifier. There is no notion of a shared default tenant.
+    """
+
+    def __init__(self, server_address, handler_class, manager):
+        if not isinstance(manager, TenantManager):
+            raise TypeError("MycoHTTPServer requires a TenantManager backend")
+        self.manager = manager
         super().__init__(server_address, handler_class)
 
 
 class MycoHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the myco daemon."""
 
-    def _check_auth(self) -> bool:
-        """Validate Bearer token if MYCO_TOKEN is configured. Returns True if ok."""
-        token = self.server.auth_token
-        if not token:
-            return True  # no auth configured
+    def _get_daemon(self) -> tuple[Daemon | None, str]:
+        """Authenticate the request and return the tenant daemon.
+
+        Every request must present `Authorization: Bearer <token>`. The
+        token's SHA256 picks the tenant; a new tenant is created on
+        demand if the token passes the strength check.
+
+        Returns (daemon, error_message). `daemon` is None on failure.
+        """
         auth = self.headers.get("Authorization", "")
-        if auth == f"Bearer {token}":
-            return True
-        self._respond(401, json.dumps({"ok": False, "error": "unauthorized"}),
-                      content_type="application/json")
-        return False
+        if not auth.startswith("Bearer "):
+            return None, "missing or invalid Authorization header"
+
+        token = auth[7:]  # strip "Bearer "
+        client_ip = self.client_address[0]
+        return self.server.manager.authenticate(token, client_ip, allow_create=True)
 
     def do_GET(self):
         if self.path == "/healthz":
             # Health check — no auth required
-            daemon = self.server.daemon_ref
-            uptime = time.time() - daemon.start_time
+            manager = self.server.manager
+            n = len(manager.daemons)
             body = json.dumps({
                 "ok": True,
-                "uptime_s": round(uptime, 1),
-                "sessions": len(daemon.index.sessions_known),
+                "mode": "multi-tenant",
+                "tenants": n,
+                # Legacy keys retained for tooling that predates the rename:
+                "channels": n,
             })
             self._respond(200, body, content_type="application/json")
             return
-        if not self._check_auth():
+
+        # All other endpoints require auth
+        daemon, err = self._get_daemon()
+        if daemon is None:
+            self._respond(401, json.dumps({"ok": False, "error": err}),
+                          content_type="application/json")
             return
+
         if self.path.startswith("/view/"):
             session = self.path[6:].strip("/").upper()
-            daemon = self.server.daemon_ref
             with daemon.lock:
+                if session not in daemon.index.sessions_known:
+                    # Auto-register: a session exists as soon as it asks for
+                    # its own view. Touch the log file so scan_once picks up
+                    # future writes with correct offsets.
+                    daemon.index.sessions_known.add(session)
+                    log_file = daemon.log_dir / f"{session}.log"
+                    log_file.touch(exist_ok=True)
+                    daemon.offsets.setdefault(session, 0)
+                    daemon.buffers.setdefault(session, "")
+                    daemon._render_to_cache()
                 view = daemon.view_cache.get(session, "")
             self._respond(200, view, content_type="text/markdown; charset=utf-8")
         elif self.path.startswith("/msg/"):
@@ -847,7 +1223,7 @@ class MycoHandler(BaseHTTPRequestHandler):
             if not filename or "/" in filename or ".." in filename:
                 self._respond(400, "invalid filename")
                 return
-            msg_file = self.server.daemon_ref.swarm_dir / "msg" / filename
+            msg_file = daemon.swarm_dir / "msg" / filename
             if not msg_file.exists():
                 self._respond(404, "not found")
                 return
@@ -860,23 +1236,26 @@ class MycoHandler(BaseHTTPRequestHandler):
             reader = qs.get("session", [None])[0]
             if reader:
                 msg_id = f"msg/{filename}"
-                daemon = self.server.daemon_ref
                 with daemon.lock:
                     daemon.index.msg_acks[msg_id].add(reader.upper())
                     daemon.index.answered_specs.add(msg_id)
                     daemon._render_to_cache()
             self._respond(200, content, content_type="text/markdown; charset=utf-8")
         elif self.path == "/status":
-            daemon = self.server.daemon_ref
             with daemon.lock:
-                status = self._build_status()
+                status = self._build_status(daemon)
             self._respond(200, json.dumps(status), content_type="application/json")
         else:
             self._respond(404, "not found")
 
     def do_POST(self):
-        if not self._check_auth():
+        # All POST endpoints require auth
+        daemon, err = self._get_daemon()
+        if daemon is None:
+            self._respond(401, json.dumps({"ok": False, "error": err}),
+                          content_type="application/json")
             return
+
         if self.path == "/events":
             body = self._read_body()
             try:
@@ -891,7 +1270,7 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(400, json.dumps({"ok": False, "error": "missing session or events"}),
                               content_type="application/json")
                 return
-            self.server.daemon_ref.ingest_events(session, events)
+            daemon.ingest_events(session, events)
             self._respond(200, json.dumps({"ok": True, "count": len(events)}),
                           content_type="application/json")
         elif self.path.startswith("/msg/"):
@@ -906,7 +1285,7 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(413, json.dumps({"ok": False, "error": f"payload exceeds {MSG_MAX_BYTES} bytes"}),
                               content_type="application/json")
                 return
-            msg_dir = self.server.daemon_ref.swarm_dir / "msg"
+            msg_dir = daemon.swarm_dir / "msg"
             msg_dir.mkdir(parents=True, exist_ok=True)
             msg_file = msg_dir / filename
             # S2 fix: reject overwrite of existing msg
@@ -931,7 +1310,7 @@ class MycoHandler(BaseHTTPRequestHandler):
                 self._respond(400, json.dumps({"ok": False, "error": "missing prompt"}),
                               content_type="application/json")
                 return
-            dispatch_dir = self.server.daemon_ref.swarm_dir / "dispatch"
+            dispatch_dir = daemon.swarm_dir / "dispatch"
             dispatch_dir.mkdir(parents=True, exist_ok=True)
             dispatch_file = dispatch_dir / f"{session}.prompt"
             dispatch_file.write_text(prompt)
@@ -952,8 +1331,7 @@ class MycoHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def _build_status(self) -> dict:
-        daemon = self.server.daemon_ref
+    def _build_status(self, daemon: Daemon) -> dict:
         sessions = {}
         for s in sorted(daemon.index.sessions_known):
             sessions[s] = {
@@ -965,7 +1343,7 @@ class MycoHandler(BaseHTTPRequestHandler):
         return {"sessions": sessions}
 
     def log_message(self, format, *args):
-        if self.server.daemon_ref.verbose:
+        if self.server.manager.verbose:
             sys.stderr.write(f"[mycod-http] {format % args}\n")
 
 
@@ -973,7 +1351,6 @@ def main():
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
     port = 0
     args_raw = sys.argv[1:]
-    # Parse --port
     filtered = []
     i = 0
     while i < len(args_raw):
@@ -985,14 +1362,35 @@ def main():
             i += 1
         elif args_raw[i] in ("-q", "--quiet"):
             i += 1
+        elif args_raw[i] in ("--multi-tenant", "--multi-channel"):
+            # Accepted for backward compatibility; the daemon is always
+            # multi-tenant now and these flags are no-ops.
+            i += 1
         else:
             filtered.append(args_raw[i])
             i += 1
     if not filtered:
         print("usage: mycod.py [-q|--quiet] [--port PORT] <swarm_dir>", file=sys.stderr)
         sys.exit(2)
+
     swarm_dir = Path(filtered[0]).resolve()
-    Daemon(swarm_dir, verbose=not quiet).run(port=port)
+    verbose = not quiet
+    if port == 0:
+        port = 8000
+
+    manager = TenantManager(swarm_dir, verbose=verbose)
+    server = MycoHTTPServer(("", port), MycoHandler, manager)
+    print(f"[mycod] HTTP server on port {port}", file=sys.stderr)
+    print(f"[mycod] tenants dir: {manager.tenants_dir}", file=sys.stderr)
+    print(f"[mycod] token requirements: min {MIN_TOKEN_LENGTH} chars, min {MIN_TOKEN_ENTROPY_BITS} bits entropy", file=sys.stderr)
+    try:
+        http_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        http_thread.start()
+        while True:
+            manager.poll_all()
+            time.sleep(0.001)
+    except KeyboardInterrupt:
+        server.shutdown()
 
 
 if __name__ == "__main__":

@@ -3,37 +3,64 @@
 # myco — launch a Claude Code session connected to a myco swarm
 #
 # Usage:
-#   myco <SESSION> [project_dir] [-- claude_flags...]
+#   myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume] [-- claude_flags...]
 #
 # Examples:
-#   myco FRONT                        # session FRONT in current dir
-#   myco FRONT ~/primoia              # session FRONT in ~/primoia
-#   myco FRONT ~/primoia --resume     # resume last session
-#   myco FRONT . -- --model sonnet    # pass flags to claude
+#   myco FRONT                                                    # session FRONT in current dir
+#   myco FRONT ~/primoia                                          # session FRONT in ~/primoia
+#   myco FRONT ~/primoia --tenant myco-abc123...                  # with explicit tenant token
+#   myco FRONT ~/primoia --daemon http://10.0.1.5:8000            # connect to remote daemon
+#   myco FRONT ~/primoia --daemon http://10.0.1.5:8000 \
+#                        --tenant myco-abc123...                  # remote daemon + tenant
+#   myco FRONT ~/primoia --resume                                 # resume last session
+#   myco FRONT . -- --model sonnet                                # pass flags to claude
+#
+# --channel is accepted as a deprecated alias for --tenant.
 #
 # Environment (optional, has defaults):
-#   MYCO_URL    — daemon URL (default: http://localhost:8000)
-#   MYCO_TOKEN  — auth token (default: none)
+#   MYCO_URL    — daemon URL (default: http://localhost:8000, can be set via --daemon)
+#   MYCO_TOKEN  — auth token (default: none, can be set via --tenant)
 #
 set -euo pipefail
 
 MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ $# -lt 1 ]; then
-    echo "usage: myco <SESSION> [project_dir] [--resume] [-- claude_flags...]" >&2
+    echo "usage: myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume] [-- claude_flags...]" >&2
     exit 2
 fi
 
-SESSION="$1"
+# Session names are always uppercase in the protocol. Normalize here so
+# the user doesn't have to remember the convention, and so `myco Worker`
+# and `myco WORKER` can't create two distinct sessions.
+SESSION="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
 shift
 
 # Parse optional project_dir and flags
 PROJECT_DIR="."
 CLAUDE_ARGS=()
 RESUME=false
+TENANT_TOKEN=""
+DAEMON_URL=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --daemon)
+            if [ $# -lt 2 ]; then
+                echo "error: --daemon requires a URL argument" >&2
+                exit 2
+            fi
+            DAEMON_URL="$2"
+            shift 2
+            ;;
+        --tenant|--channel)
+            if [ $# -lt 2 ]; then
+                echo "error: $1 requires a token argument" >&2
+                exit 2
+            fi
+            TENANT_TOKEN="$2"
+            shift 2
+            ;;
         --resume)
             RESUME=true
             shift
@@ -98,11 +125,25 @@ fi
 # --- Export env vars and launch ---
 export MYCO_SESSION="$SESSION"
 export MYCO_INJECT_VIEW=1
-export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
-# MYCO_TOKEN inherited from environment if set
+
+# Set daemon URL from --daemon flag, then env, then default
+if [ -n "$DAEMON_URL" ]; then
+    export MYCO_URL="$DAEMON_URL"
+else
+    export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
+fi
+
+# Set token from --tenant flag or inherit from environment
+if [ -n "$TENANT_TOKEN" ]; then
+    export MYCO_TOKEN="$TENANT_TOKEN"
+fi
+# Otherwise MYCO_TOKEN inherited from environment if set
 
 echo "[myco] session=$SESSION project=$PROJECT_DIR"
 echo "[myco] daemon=$MYCO_URL"
+if [ -n "${MYCO_TOKEN:-}" ]; then
+    echo "[myco] tenant token configured (${#MYCO_TOKEN} chars)"
+fi
 
 if [ "$RESUME" = true ]; then
     CLAUDE_ARGS=("--resume" "${CLAUDE_ARGS[@]}")
