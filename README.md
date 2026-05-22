@@ -1,18 +1,25 @@
 # myco
 
-> Silent consciousness network for parallel Claude Code sessions.
-
 [![PyPI](https://img.shields.io/pypi/v/primoia-myco.svg)](https://pypi.org/project/primoia-myco/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-285_passing-brightgreen.svg)](prototype/test_v1.py)
+[![Tests](https://img.shields.io/badge/tests-285_passing-brightgreen.svg)](prototype/README.md)
 [![Status](https://img.shields.io/badge/status-v1.1_stable-green.svg)](docs/PROTOCOL.md)
-[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](prototype/)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](pyproject.toml)
 
 🇧🇷 [Leia em português](README.pt-BR.md)
 
-**myco** is a coordination protocol for multiple Claude Code sessions working in parallel. A Python daemon keeps an in-memory index of swarm events and delivers personalized views per session — each session knows in real-time what the others are doing, with no central orchestrator and without the human becoming a messenger.
+<!-- 
+  TODO: drop docs/demo.gif here once recorded — see docs/RECORD-DEMO-GIF.md
+  <p align="center">
+    <img src="docs/demo.gif" alt="myco demo: ALICE asks BOB through the swarm bus" width="800">
+  </p>
+-->
 
-The analogy is the mycelium: an underground fungal network that connects independent trees, silently transporting signals. Each Claude session remains autonomous in its own project, but shares a bus that myco keeps alive and filtered.
+**Problem:** running multiple Claude Code sessions in parallel produces conflicts, repeated work, and stale assumptions — the agents have no shared awareness.
+
+**myco** is a text-only coordination protocol + tiny Python daemon that gives N parallel agent sessions a shared, filtered view of each other's actions. No central orchestrator. No tool calls. Vendor-agnostic (Claude, DeepSeek, anything Anthropic-compatible).
+
+> The name comes from the mycelium: an underground fungal network that connects independent trees, silently transporting signals between them.
 
 ## Why
 
@@ -23,6 +30,22 @@ If you use Claude Code (or any agent CLI) intensively, you've probably hit the w
 - **Parallel tabs without coordination are worse.** Three agents editing the same repo with no shared awareness produces conflicts, repeated work, and stale assumptions.
 
 myco lets you run **N persistent sessions in parallel**, each with its own role and clean context, sharing only what matters through a silent bus.
+
+## Comparison with alternatives
+
+myco occupies a niche that the big agent frameworks don't address: **human-in-the-loop coordination of N persistent agent sessions across providers, with no central orchestrator**.
+
+| | myco | LangGraph / CrewAI / AutoGen | tmux / tmuxinator | Multiple chat tabs |
+|---|---|---|---|---|
+| **Coordination model** | Human routes, agents publish to shared bus | Code-driven orchestrator | None — just layout | None |
+| **Persistence across days** | ✅ via `--resume` + daemon ledger | ❌ runs are stateless by default | ❌ layout only | ❌ tab dies, history goes |
+| **Multi-provider in one swarm** | ✅ Claude + DeepSeek + … | Possible but requires per-framework adapters | N/A | N/A |
+| **Cross-machine** | ✅ HTTP daemon, sessions on any VM | ❌ in-process | ❌ local only | ❌ |
+| **Built-in protocol lint** | ✅ daemon warns on common mistakes | ❌ | N/A | N/A |
+| **Code overhead per project** | None — hooks read/write text | High — define graphs, tools, state | Low — yaml layout | Zero |
+| **Best for** | Devs running 5–10 long-lived sessions | Autonomous agent loops with no human | Window/pane management | Casual single-session use |
+
+In short: if you're already pasting copy-paste between Claude tabs to keep them in sync, myco replaces the copy-paste with a silent bus. If you wanted a fully autonomous multi-agent loop with no human, use LangGraph/CrewAI/AutoGen instead — they're built for that and myco is not.
 
 ## Multi-provider (Claude × DeepSeek × anything Anthropic-compatible)
 
@@ -52,47 +75,60 @@ Practical implications:
 - **Resilience** — one provider has an outage, the swarm keeps moving
 - **No vendor lock-in** — the protocol doesn't care who's behind any session
 
-## Quickstart
+## Install
 
-### Option A — pip install (daemon + commands on PATH)
+Works on macOS and Linux. Requires **Python 3.8+** and the Claude Code CLI (for the launcher).
 
 ```bash
+# Check Python version (must be 3.8 or newer)
+python3 --version
+
+# Install from PyPI — installs `mycod`, `myco-view`, `myco-hook`,
+# `myco-prompt-hook` as commands on your PATH. Stdlib-only, zero deps.
 pip install primoia-myco
-
-# 1. Generate a tenant token (any 32+ char secret with enough entropy)
-export MYCO_TOKEN="myco-$(openssl rand -hex 24)"
-export MYCO_URL="http://localhost:8000"
-
-# 2. Run the daemon in one terminal
-mycod --port 8000 /tmp/myco-swarm
-
-# 3. In each session terminal, set the hooks manually and launch claude:
-#    (the bash launcher in Option B does this automatically)
-export MYCO_SESSION=FRONT MYCO_INJECT_VIEW=1
-# ... configure .claude/settings.json hooks pointing at `myco-hook` and
-#     `myco-prompt-hook` (both installed by pip on your PATH), then run `claude`.
 ```
 
-This gives you `mycod`, `myco-view`, `myco-hook`, `myco-prompt-hook` on the PATH.
-Use this path if you want to wire `myco` into your own automation.
+That's it. No system packages, no openssl required, no compilation. Token generation uses Python's stdlib (see below).
 
-### Option B — git clone (full launcher with auto-setup)
+## Two sessions chatting in 60 seconds
+
+This is the minimal "is it real" demo. You'll run a daemon and two Claude Code sessions that pass a question back and forth through the myco bus.
 
 ```bash
-git clone https://github.com/primoia/myco.git
-cd myco
-
-# Run the daemon
-python3 prototype/mycod.py --port 8000 /tmp/myco-swarm
-
-# Launch coordinated sessions — the launcher copies CLAUDE.md and
-# generates .claude/settings.json with the hooks pointing at the right paths
-./myco FRONT  ~/my-frontend-project
-./myco BACK   ~/my-backend-project
-./myco AUTH   ~/my-auth-project
+# ── Terminal 1: daemon ───────────────────────────────────────────────
+pip install primoia-myco
+mkdir -p /tmp/myco-demo
+mycod --port 8000 /tmp/myco-demo
 ```
 
-Each session automatically receives a context panel with every prompt and reports actions via `<myco>` blocks in its text.
+```bash
+# ── Terminal 2: launcher repo (one-time, for the bash launcher script) ─
+git clone --depth=1 https://github.com/primoia/myco.git ~/myco-launcher
+cd ~/myco-launcher
+
+# Generate a random tenant token — stdlib only, no openssl needed
+export MYCO_URL=http://localhost:8000
+export MYCO_TOKEN="myco-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+# Start session ALICE (in a fresh empty workdir)
+mkdir -p /tmp/alice && ./myco ALICE /tmp/alice
+```
+
+```bash
+# ── Terminal 3: second session, same MYCO_URL + MYCO_TOKEN ──────────
+cd ~/myco-launcher
+export MYCO_URL=http://localhost:8000
+export MYCO_TOKEN="$( ... paste the same token from Terminal 2 ... )"
+
+mkdir -p /tmp/bob && ./myco BOB /tmp/bob
+```
+
+Now in Terminal 2 (ALICE), tell Claude:
+> *Ask BOB which JWT library we should use. Wait for the reply.*
+
+ALICE will emit `<myco>ask BOB which-jwt-library</myco>`, which the daemon delivers to BOB's panel on its next prompt. BOB will see the pending question, answer with `<myco>reply ALICE use-jose-v5</myco>`, and ALICE's next prompt will show the answer in its panel — no copy-paste, no shared file, no manual relay.
+
+Want a richer scenario? See [`examples/heterogeneous-swarm/`](examples/heterogeneous-swarm/) for the Claude × DeepSeek experiment with 3 rounds and independent self-evaluations.
 
 ## How it works
 

@@ -1,18 +1,18 @@
 # myco
 
-> Rede silenciosa de consciência compartilhada entre sessões Claude Code.
-
 [![PyPI](https://img.shields.io/pypi/v/primoia-myco.svg)](https://pypi.org/project/primoia-myco/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-285_passing-brightgreen.svg)](prototype/test_v1.py)
+[![Tests](https://img.shields.io/badge/tests-285_passing-brightgreen.svg)](prototype/README.md)
 [![Status](https://img.shields.io/badge/status-v1.1_stable-green.svg)](docs/PROTOCOL.md)
-[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](prototype/)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](pyproject.toml)
 
 🇺🇸 [Read in English](README.md)
 
-**myco** é um protocolo de coordenação para múltiplas sessões Claude Code (ou qualquer agente CLI) trabalhando em paralelo. Um daemon Python mantém um índice em memória dos eventos do swarm e entrega views personalizadas por sessão — cada sessão sabe em tempo real o que as outras estão fazendo, sem orquestrador central e sem o humano virar mensageiro.
+**Problema:** rodar múltiplas sessões Claude Code em paralelo gera conflito, retrabalho e suposição estale — os agentes não têm awareness compartilhada.
 
-A analogia é o micélio: uma rede subterrânea de fungos que conecta árvores independentes, transportando sinais silenciosamente. Cada sessão Claude continua autônoma no seu projeto, mas compartilha um barramento que o myco mantém vivo e filtrado.
+**myco** é um protocolo de coordenação text-only + um daemon Python pequeno que dá a N sessões paralelas uma view compartilhada e filtrada das ações umas das outras. Sem orquestrador central. Sem tool calls. Agnóstico de vendor (Claude, DeepSeek, qualquer endpoint Anthropic-compatível).
+
+> O nome vem do micélio: uma rede subterrânea de fungos que conecta árvores independentes, transportando sinais silenciosamente entre elas.
 
 ## Por quê
 
