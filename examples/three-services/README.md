@@ -1,14 +1,14 @@
-# Exemplo: three-services
+# Example: three-services
 
-Três projetos fictícios que se cruzam via API, operados por três sessões Claude em paralelo, coordenados por myco.
+Three fictional projects that cross paths via APIs, operated by three Claude sessions in parallel, coordinated by myco.
 
-## Os três projetos
+## The three projects
 
-- **SN** — serviço de notificações (precisa chamar SM e IAM)
-- **SM** — serviço de mensageria (precisa de IAM para auth)
-- **IAM** — identity & access management (independente, mas fornece auth para os outros)
+- **SN** — notification service (needs to call SM and IAM)
+- **SM** — messaging service (needs IAM for auth)
+- **IAM** — identity & access management (independent, but provides auth for the others)
 
-## Dependências naturais
+## Natural dependencies
 
 ```
     IAM  ──────┐
@@ -17,11 +17,11 @@ Três projetos fictícios que se cruzam via API, operados por três sessões Cla
     SM ──────▶ SN
 ```
 
-- `IAM` publica `IAM.auth.v2` → desbloqueia `SM` e `SN`
-- `SM` publica `SM.api.messages` → desbloqueia `SN`
-- `SN` consome ambos
+- `IAM` publishes `IAM.auth.v2` → unblocks `SM` and `SN`
+- `SM` publishes `SM.api.messages` → unblocks `SN`
+- `SN` consumes both
 
-## Como rodar
+## How to run
 
 ```bash
 # Terminal 1 — daemon
@@ -37,15 +37,15 @@ python3 ~/myco/prototype/mycod.py --port 8000 /tmp/myco-swarm
 ~/myco/myco SN ./SN
 ```
 
-## A feature imaginada
+## The imagined feature
 
-"Adicionar envio de notificação quando o usuário completar o onboarding."
+"Send a notification when the user completes onboarding."
 
-Isso exige:
+This requires:
 
-1. IAM criar um webhook `user.onboarded`
-2. SM consumir o webhook e enfileirar mensagem
-3. SN ler da fila e disparar a notificação
+1. IAM exposes a webhook `user.onboarded`
+2. SM consumes the webhook and enqueues a message
+3. SN reads from the queue and fires the notification
 
-Sem myco: você media os três Claudes no olho.
-Com myco: os três se coordenam via declarações no log, e você só intervém se houver impasse.
+Without myco: you'd babysit all three Claudes by hand.
+With myco: the three coordinate via declarations in the log, and you only intervene if there's a deadlock.

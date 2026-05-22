@@ -113,8 +113,8 @@ class TestParseDetailKvs:
         assert "foo:bar" in text
 
     def test_addr_key(self):
-        text, kvs = parse_detail_kvs("dev-server addr:http://192.168.0.214:7777")
-        assert kvs == {"addr": "http://192.168.0.214:7777"}
+        text, kvs = parse_detail_kvs("dev-server addr:http://192.168.1.100:7777")
+        assert kvs == {"addr": "http://192.168.1.100:7777"}
         assert text == "dev-server"
 
 
@@ -314,16 +314,16 @@ class TestSwarmIndexApply:
 
     def test_up_with_addr(self):
         idx = SwarmIndex()
-        idx.apply(self._ev("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        idx.apply(self._ev("AUTH", "T0 AUTH up dev-server addr:http://192.168.1.100:7777"))
         assert idx.resources["dev-server"]["state"] == "UP"
-        assert idx.resources["dev-server"]["addr"] == "http://192.168.0.214:7777"
+        assert idx.resources["dev-server"]["addr"] == "http://192.168.1.100:7777"
 
     def test_down_preserves_addr(self):
         idx = SwarmIndex()
-        idx.apply(self._ev("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        idx.apply(self._ev("AUTH", "T0 AUTH up dev-server addr:http://192.168.1.100:7777"))
         idx.apply(self._ev("AUTH", "T1 AUTH down dev-server"))
         assert idx.resources["dev-server"]["state"] == "DOWN"
-        assert idx.resources["dev-server"]["addr"] == "http://192.168.0.214:7777"
+        assert idx.resources["dev-server"]["addr"] == "http://192.168.1.100:7777"
 
     def test_direct(self):
         idx = SwarmIndex()
@@ -683,9 +683,9 @@ class TestRenderViewWorker:
 
     def test_resources_addr_shown(self):
         idx = SwarmIndex()
-        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server addr:http://192.168.1.100:7777"))
         view = render_view(idx, "AUTH")
-        assert "http://192.168.0.214:7777" in view
+        assert "http://192.168.1.100:7777" in view
         assert "dev-server" in view
 
     def test_no_resources_message(self):
@@ -2493,10 +2493,10 @@ class TestReKey:
 class TestUpMerge:
     def test_up_without_addr_preserves_existing(self):
         idx = SwarmIndex()
-        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server addr:http://192.168.0.214:7777"))
+        idx.apply(parse_event("AUTH", "T0 AUTH up dev-server addr:http://192.168.1.100:7777"))
         idx.apply(parse_event("AUTH", "T1 AUTH up dev-server"))
         assert idx.resources["dev-server"]["state"] == "UP"
-        assert idx.resources["dev-server"]["addr"] == "http://192.168.0.214:7777"
+        assert idx.resources["dev-server"]["addr"] == "http://192.168.1.100:7777"
 
     def test_up_with_new_addr_updates(self):
         idx = SwarmIndex()
@@ -2774,7 +2774,7 @@ class TestUpClearsNeedBlocker:
         idx = SwarmIndex()
         idx.apply(self._ev("E2E", "T0 E2E need backend-up-em-214-8080"))
         assert idx.blockers_for("E2E") == ["backend-up-em-214-8080"]
-        idx.apply(self._ev("BACK", "T1 BACK up backend addr:http://192.168.0.214:8080"))
+        idx.apply(self._ev("BACK", "T1 BACK up backend addr:http://192.168.1.100:8080"))
         assert idx.blockers_for("E2E") == []
 
     def test_up_distinct_resource_does_not_clear_need(self):

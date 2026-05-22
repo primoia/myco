@@ -26,7 +26,7 @@ Um serviço externo captura esse bloco e distribui para as outras sessões. **N�
 - `done <objeto>` — terminei X (use `ref:`, `spec:`, `result:ok|fail|partial`)
 - `need <objeto>` — preciso de X (de outra sessão)
 - `block <motivo>` — estou bloqueado
-- `up <recurso>` — recurso subiu (use `addr:` para endereço: `up dev-server addr:http://192.168.0.214:7777`)
+- `up <recurso>` — recurso subiu (use `addr:` para endereço: `up dev-server addr:http://192.168.1.100:7777`)
 - `down <recurso>` — recurso caiu
 - `ask <destinatário> <pergunta>` — pergunta dirigida (use `spec:` para specs ricas)
 - `reply <destinatário> <resposta>` — resposta a uma pergunta (use `spec:` para detalhes)
@@ -78,7 +78,7 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
 | `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
-| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
+| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.1.100:7777` |
 | `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
 | `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
 

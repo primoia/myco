@@ -101,7 +101,7 @@ if [ ! -f "$SETTINGS_FILE" ]; then
         "hooks": [
           {
             "type": "command",
-            "command": "python3 $MYCO_DIR/prototype/myco-hook.py"
+            "command": "python3 $MYCO_DIR/prototype/myco_hook.py"
           }
         ]
       }

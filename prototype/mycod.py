@@ -1473,6 +1473,22 @@ class MycoHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("usage: mycod [-h] [--port PORT] [-q|--quiet] <swarm_dir>")
+        print()
+        print("myco daemon — HTTP server + in-memory swarm index + view renderer")
+        print()
+        print("Positional:")
+        print("  swarm_dir       directory for log/, view/, msg/ (e.g. /tmp/myco-swarm)")
+        print()
+        print("Options:")
+        print("  --port PORT     HTTP port (default: 8000)")
+        print("  -q, --quiet     suppress debug output")
+        print("  -h, --help      show this message and exit")
+        print()
+        print("Auth: every request except /healthz requires Authorization: Bearer <token>.")
+        print("Generate a token with: openssl rand -hex 24")
+        return 0
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
     port = 0
     args_raw = sys.argv[1:]

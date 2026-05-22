@@ -55,7 +55,7 @@ Exemplos:
 | `done` | terminei X, efeito publicado | `done auth.v2 result:ok ref:origin/feat/new-auth` |
 | `need` | declaro dependência (precondição) | `need AUTH.auth.v2` |
 | `block` | estou bloqueado | `block esperando-deploy-do-db` |
-| `up` | recurso subiu (suporta `addr:`) | `up dev-server addr:http://192.168.0.214:7777` |
+| `up` | recurso subiu (suporta `addr:`) | `up dev-server addr:http://192.168.1.100:7777` |
 | `down` | recurso caiu | `down endpoint /api/auth` |
 | `ask` | pergunta dirigida a outra sessão | `ask DIRECTOR preciso-de-specs` |
 | `reply` | resposta a uma pergunta | `reply BACK resposta re:msg/BACK-005.md spec:msg/AUTH-002.md` |
@@ -96,7 +96,7 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
 | `spec:` | spec, contrato ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
-| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
+| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.1.100:7777` |
 | `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
 | `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
 | `channel:` | canal(is) de visibilidade; padrão `global`; lista por vírgula | `channel:review-42` / `channel:sec,ops` |

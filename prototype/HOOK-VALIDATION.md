@@ -50,7 +50,7 @@ O daemon `mycod.py` (validado na Fase 0, ver `RESULTS.md`) pega o resto como já
 Comando:
 
 ```bash
-cd /home/cezar/Workspace/myco
+cd ~/myco
 MYCO_SWARM=/mnt/ramdisk/myco-final MYCO_SESSION=SM MYCO_HOOK_DEBUG=1 \
   claude -p --permission-mode bypassPermissions --tools "" --model sonnet \
          --debug-file /tmp/final-debug.log < /tmp/myco-prompt.txt

@@ -47,7 +47,8 @@ TAG_RE = re.compile(r"<myco>(.*?)</myco>", re.DOTALL | re.IGNORECASE)
 
 VALID_VERBS = {
     "start", "done", "need", "block",
-    "up", "down", "direct", "ask", "note", "log", "reply", "say",
+    "up", "down", "direct", "ask", "reply", "say",
+    "private", "log", "note",  # private is canonical (v1.6); log/note are legacy aliases
 }
 
 

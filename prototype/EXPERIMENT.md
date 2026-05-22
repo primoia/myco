@@ -31,7 +31,7 @@ Token único seedado nos logs: `direct TEST use password Hunter3 for DB`
 
 ### Setup das condições
 
-- **A/B** (injeção OFF): rodar de `cd /home/cezar/Workspace/myco` onde `swarm/CLAUDE.md`
+- **A/B** (injeção OFF): rodar de `cd ~/myco` onde `swarm/CLAUDE.md`
   está visível. `MYCO_INJECT_VIEW=0` (ou não setado).
 - **C/D** (injeção ON): rodar de `cd /tmp/myco-experiment/` onde há apenas
   `CLAUDE.md` mínimo ("You are session TEST. Be terse.").
@@ -43,7 +43,7 @@ Token único seedado nos logs: `direct TEST use password Hunter3 for DB`
 
 ```bash
 # Condições A/B (indução)
-cd /home/cezar/Workspace/myco
+cd ~/myco
 MYCO_SESSION=TEST MYCO_SWARM=/tmp/myco-experiment \
   claude -p "<prompt>" --permission-mode bypassPermissions
 

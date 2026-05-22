@@ -1,98 +1,98 @@
-# myco — Daemon e hooks (Python)
+# myco — Daemon and hooks (Python)
 
-Implementação completa do protocolo myco v1. Daemon, hooks Claude Code, e suite de testes.
+Complete implementation of the myco v1 protocol. Daemon, Claude Code hooks, and test suite.
 
-## Componentes
+## Components
 
-| Arquivo | Descrição |
+| File | Description |
 |---|---|
-| `mycod.py` | Daemon: polling + HTTP server + SwarmIndex + renderer (~1000 linhas) |
-| `myco-hook.py` | Stop hook: captura `<myco>` blocks → POST /events no daemon |
-| `myco_prompt_hook.py` | UserPromptSubmit hook: injeta view como additionalContext |
-| `myco_view.py` | Biblioteca + CLI para renderizar views on-demand |
-| `test_v1.py` | Suite de testes: **224 testes** cobrindo toda a funcionalidade |
+| `mycod.py` | Daemon: polling + HTTP server + SwarmIndex + renderer (~1000 lines) |
+| `myco-hook.py` | Stop hook: captures `<myco>` blocks → POST /events to the daemon |
+| `myco_prompt_hook.py` | UserPromptSubmit hook: injects the view as additionalContext |
+| `myco_view.py` | Library + CLI to render views on demand |
+| `test_v1.py` | Test suite: **285 unit tests** covering full functionality (+ 5 integration tests in `test_multi_tenant.py` that require a running daemon) |
 
-## Como rodar o daemon
+## Running the daemon
 
 ```bash
-# Porta padrão 8000; o daemon é sempre multi-channel.
+# Default port 8000; daemon is always multi-channel.
 python3 mycod.py /tmp/myco-swarm
 
-# Porta customizada
+# Custom port
 python3 mycod.py --port 9000 /tmp/myco-swarm
 
-# Modo silencioso (sem output de debug)
+# Quiet mode (no debug output)
 python3 mycod.py -q /tmp/myco-swarm
 ```
 
-Autenticação:
-- Toda requisição (exceto `/healthz`) precisa de `Authorization: Bearer <token>`.
-- O SHA256 do token identifica o canal; canais são completamente isolados.
-- Tokens precisam atender os requisitos mínimos de força (≥ 32 chars, ≥ 80 bits de entropia) no momento em que o canal é criado.
-- Gere um token com `openssl rand -hex 24` ou similar.
+Authentication:
+- Every request (except `/healthz`) needs `Authorization: Bearer <token>`.
+- The SHA256 of the token identifies the channel; channels are fully isolated.
+- Tokens must meet minimum strength requirements (≥ 32 chars, ≥ 80 bits of entropy) at the moment the channel is created.
+- Generate a token with `openssl rand -hex 24` or similar.
 
-O daemon:
-- Cria um subdiretório por canal em `<swarm_dir>/channels/<sha256>/`
-- Dentro de cada canal: `log/`, `view/`, `msg/`
-- Roda HTTP server em thread background + poll loop em thread principal
-- Re-renderiza views a cada mudança detectada
-- Reconstrói estado completo do zero no restart (stateless, canais são re-lidos do disco)
-- Auto-registra uma sessão no primeiro `GET /view/<SESSAO>`: a sessão passa a existir no momento em que pede a própria view, sem precisar publicar nada primeiro.
+The daemon:
+- Creates a subdirectory per channel in `<swarm_dir>/channels/<sha256>/`
+- Inside each channel: `log/`, `view/`, `msg/`
+- Runs the HTTP server in a background thread + poll loop on the main thread
+- Re-renders views on every detected change
+- Rebuilds full state from scratch on restart (stateless — channels are re-read from disk)
+- Auto-registers a session on the first `GET /view/<SESSION>`: the session starts existing the moment it asks for its own view, without needing to publish anything first.
 
-## Como rodar os testes
+## Running the tests
 
 ```bash
 cd prototype
 python3 -m pytest test_v1.py -v
 ```
 
-224 testes cobrindo:
+285 tests covering:
 
-- Parsing de eventos e key:value
+- Event and key:value parsing
 - SwarmIndex (status, needs/provides, blockers, dependents)
-- Rendering de views (worker, DIRECTOR, filtros de visibilidade)
+- View rendering (worker, DIRECTOR, visibility filters)
 - HTTP endpoints (events, view, msg, healthz, status, dispatch)
-- Autenticação (Bearer token)
-- Modo híbrido (HTTP + filesystem coexistindo)
-- Mensagens ricas (msg/ GET/POST, auto-ack, imutabilidade, size limit)
-- Segurança (tag sanitization, path traversal, self-ask)
-- Verbos: say (broadcast), ask/reply, note, direct
-- Question TTL (expiração após 30min)
+- Authentication (Bearer token)
+- Hybrid mode (HTTP + filesystem coexisting)
+- Rich messages (msg/ GET/POST, auto-ack, immutability, size limit)
+- Security (tag sanitization, path traversal, self-ask)
+- Verbs: say (broadcast), ask/reply, note, direct
+- Question TTL (expiry after 30min)
 - Last-seen timestamps
 
-## Requisitos
+## Requirements
 
 - Python 3.8+
-- Sem dependências externas (usa só stdlib)
-- `pytest` para rodar os testes
+- No external dependencies (stdlib only)
+- `pytest` for the tests
 
-## Como sessões se conectam
+## How sessions connect
 
-Sessões não precisam de setup manual. O launcher `myco` (na raiz do repo) faz tudo:
+Sessions don't need manual setup. The `myco` launcher (at the repo root) does everything:
 
 ```bash
-# Na raiz do repo myco
-./myco FRONT ~/meu-projeto
+# At the myco repo root
+./myco FRONT ~/my-project
 ```
 
-Para setup manual (raro):
+For manual setup (rare):
 
 ```bash
 export MYCO_SESSION=FRONT
 export MYCO_URL=http://localhost:8000
-export MYCO_TOKEN=$(openssl rand -hex 24)  # obrigatório
+export MYCO_TOKEN=$(openssl rand -hex 24)  # required
 export MYCO_INJECT_VIEW=1
 ```
 
-> Quando `MYCO_URL` está definido, os hooks tratam o daemon HTTP como fonte
-> única de verdade — não há fallback para um swarm local. Um daemon
-> inacessível ou um token rejeitado resulta em "view vazia", nunca em
-> "view misturada com outro swarm".
+> When `MYCO_URL` is set, the hooks treat the HTTP daemon as the single
+> source of truth — no fallback to a local swarm. An unreachable daemon
+> or rejected token results in "empty view", never in "view mixed with
+> another swarm".
 
-## Arquivos de validação histórica
+## Historical validation files
 
-| Arquivo | Descrição |
+| File | Description |
 |---|---|
-| `EXPERIMENT.md` | Experimento de injeção vs indução (condições A-F) |
-| `RESULTS.md` | Resultados da validação Fase 0 (latência, concorrência) |
-| `HOOK-VALIDATION.md` | Validação do Stop hook |
+| `EXPERIMENT.md` | Injection vs induction experiment (conditions A–F) |
+| `RESULTS.md` | Phase 0 validation results (latency, concurrency) |
+| `HOOK-VALIDATION.md` | Stop hook validation |

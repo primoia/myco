@@ -40,7 +40,7 @@ O daemon faz **lint automático**: usar `reply X` sem ask pendente de X, ou `pri
 | `ref:` | referência git (branch, tag) | `ref:origin/feat/login` |
 | `spec:` | spec ou mensagem rica em msg/ | `spec:msg/AUTH-001.md` |
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
-| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.0.214:7777` |
+| `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.1.100:7777` |
 | `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
 | `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
 

@@ -67,7 +67,7 @@ Em qualquer verbo, anexe pares `chave:valor` ao final do detalhe:
 | `ref:` | branch/tag git em `done` | `ref:origin/feat/login` |
 | `spec:` | aponta msg/ rico | `spec:msg/AUTH-001.md` |
 | `ack:` | ack de msg recebida | `ack:msg/CART-001.md` |
-| `addr:` | endereço de rede em `up` | `addr:http://192.168.0.214:7777` |
+| `addr:` | endereço de rede em `up` | `addr:http://192.168.1.100:7777` |
 | `result:` | em `done` | `result:ok` / `result:fail` / `result:partial` |
 | `re:` | pergunta sendo respondida em `reply` | `re:msg/CART-001.md` |
 | `channel:` | canal(is) de visibilidade | `channel:review-42` ou `channel:sec,ops` |
