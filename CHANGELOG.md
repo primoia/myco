@@ -3,6 +3,15 @@
 All notable changes to myco.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.1.1] — anonymized author + private alias bug fix
+
+### Changed
+- Package author + maintainer in `pyproject.toml` changed from "Cezar Fuhr" to "Primoia" — aligns with the project being a small dev shop rather than tied to a single developer.
+- `LICENSE` copyright holder changed from "Cezar Fuhr" to "Primoia" for the same reason.
+
+### Fixed
+- `prototype/myco_hook.py` backward-compat symlink `prototype/myco-hook.py` retained so sessions configured before the rename keep working.
+
 ## [Unreleased]
 
 ### Added

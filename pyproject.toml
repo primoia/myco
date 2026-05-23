@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "primoia-myco"
-version = "0.1.0"
+version = "0.1.1"
 description = "Coordinate parallel AI agent sessions across providers (Claude, DeepSeek, ...) — text-only protocol + Python daemon"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
 authors = [
-    { name = "Cezar Fuhr", email = "primoia.dev@gmail.com" },
+    { name = "Primoia", email = "primoia.dev@gmail.com" },
+]
+maintainers = [
+    { name = "Primoia", email = "primoia.dev@gmail.com" },
 ]
 keywords = [
     "claude-code",
