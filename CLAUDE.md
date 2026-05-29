@@ -55,6 +55,7 @@ Casos checados:
 
 - `reply X` sem ask em aberto de X → você queria `ask X` (peers não verão isso como pendente).
 - `private` (ou alias `log`/`note`) enquanto há ask(s) em aberto pra você → você queria `reply <quem-perguntou>` (`private` é invisível para peers).
+- `spec:msg/X.md` apontando para uma msg que ainda não existe → ponteiro pendurado (o destinatário receberia 404). Crie a msg (inline `msgs:` no mesmo POST, ou `POST /msg/X.md`) ou remova o `spec:`.
 
 Avisos são informacionais — o evento é aceito mesmo com warning. Trate como segunda opinião gratuita.
 

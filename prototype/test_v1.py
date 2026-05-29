@@ -2972,6 +2972,60 @@ class TestLintWrongVerb:
             assert idx.lint_event(ev) == [], f"verb {ev['verb']} should not warn"
 
 
+class TestLintDanglingSpec:
+    """A `spec:msg/X.md` pointer whose file was never created leaves the
+    recipient with a 404 and silently breaks the rich-comm loop. The daemon
+    now warns when the referenced msg doesn't exist (only when msg_dir is
+    wired, i.e. the HTTP ingest path)."""
+
+    def _ev(self, session, line):
+        return parse_event(session, line)
+
+    def test_dangling_spec_warns(self, tmp_path):
+        msg_dir = tmp_path / "msg"
+        msg_dir.mkdir()
+        idx = SwarmIndex()
+        idx.msg_dir = msg_dir
+        ev = self._ev("BACK", "T0 BACK ask E2E foo spec:msg/NAOEXISTE.md")
+        warnings = idx.lint_event(ev)
+        assert len(warnings) == 1
+        assert "spec:msg/NAOEXISTE.md" in warnings[0]
+        assert "404" in warnings[0]
+
+    def test_existing_spec_no_warning(self, tmp_path):
+        msg_dir = tmp_path / "msg"
+        msg_dir.mkdir()
+        (msg_dir / "BACK-001.md").write_text("hello")
+        idx = SwarmIndex()
+        idx.msg_dir = msg_dir
+        ev = self._ev("BACK", "T0 BACK ask E2E foo spec:msg/BACK-001.md")
+        assert idx.lint_event(ev) == []
+
+    def test_spec_without_msg_prefix_resolves(self, tmp_path):
+        """spec: may be written as bare 'X.md' without the msg/ prefix."""
+        msg_dir = tmp_path / "msg"
+        msg_dir.mkdir()
+        (msg_dir / "BACK-001.md").write_text("hello")
+        idx = SwarmIndex()
+        idx.msg_dir = msg_dir
+        ev = self._ev("BACK", "T0 BACK ask E2E foo spec:BACK-001.md")
+        assert idx.lint_event(ev) == []
+
+    def test_no_spec_no_warning(self, tmp_path):
+        msg_dir = tmp_path / "msg"
+        msg_dir.mkdir()
+        idx = SwarmIndex()
+        idx.msg_dir = msg_dir
+        ev = self._ev("BACK", "T0 BACK start task")
+        assert idx.lint_event(ev) == []
+
+    def test_msg_dir_unset_skips_check(self):
+        """The scan path (no msg_dir wired) must not crash on a spec: event."""
+        idx = SwarmIndex()
+        ev = self._ev("BACK", "T0 BACK ask E2E foo spec:msg/NAOEXISTE.md")
+        assert idx.lint_event(ev) == []
+
+
 class TestLintInIngestEvents:
     """End-to-end: warnings flow through ingest_events to the HTTP response."""
 

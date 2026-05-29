@@ -281,6 +281,9 @@ class SwarmIndex:
         # channel membership: session → set of channels it belongs to
         # every session is implicitly a member of "global"
         self.session_channels = defaultdict(lambda: {GLOBAL_CHANNEL})
+        # v1.4: msg directory, wired by the Daemon so lint_event can check
+        # that a spec:msg/X.md pointer actually resolves to an existing file.
+        self.msg_dir = None
 
     def apply(self, ev):
         s = ev["session"]
@@ -421,13 +424,16 @@ class SwarmIndex:
 
         Returns a list of warning strings. Empty list means no issues.
 
-        Two checks, both mechanical (zero false positives):
+        Three checks, all mechanical (zero false positives):
 
         a. `reply X ...` with no pending ask from X to the sender →
            warn that this isn't actually answering anything.
         b. `private` (or its `log`/`note` aliases) with one or more pending
            asks targeted at the sender → suggest `reply` since the writer
            may be answering in private mode that peers can't see.
+        c. any event carrying `spec:msg/X.md` whose file doesn't exist yet →
+           warn about a dangling pointer (recipient would get a 404). Inline
+           `msgs:` are written before ingest, so a correct inline use passes.
         """
         warnings = []
         s = ev["session"]
@@ -461,6 +467,18 @@ class SwarmIndex:
                     f"{verb}: peers can't see this. You have pending ask(s) "
                     f"from {ask_list} — if you're answering, use "
                     f"`reply <session>` instead."
+                )
+
+        # c. spec: pointer to a msg that doesn't exist → dangling reference
+        spec_id = ev.get("kvs", {}).get("spec")
+        if spec_id and self.msg_dir is not None:
+            fname = spec_id.split("/", 1)[-1]
+            if fname and not (self.msg_dir / fname).exists():
+                warnings.append(
+                    f"spec:{spec_id} referenced but no such msg exists yet. "
+                    f"Create it (inline `msgs:` on this same POST, or "
+                    f"POST /msg/{fname}) or drop the spec: pointer — the "
+                    f"recipient gets a 404 otherwise."
                 )
 
         return warnings
@@ -942,6 +960,7 @@ class Daemon:
         self.view_dir.mkdir(parents=True, exist_ok=True)
         self.msg_dir.mkdir(parents=True, exist_ok=True)
         self.index = SwarmIndex()
+        self.index.msg_dir = self.msg_dir
         self.offsets = {}
         self.buffers = {}
         self.render_count = 0
