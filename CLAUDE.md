@@ -40,6 +40,7 @@ Notas de comportamento:
 - O painel mostra a linha **AGORA** com seu último evento, qualquer que seja o verbo. Status (`active` / `idle` / `blocked`) só muda em `start` / `done` / `block`.
 - `direct` é emitido pelo DIRECTOR (ou pelo humano via DIRECTOR). Sessões worker recebem diretivas via painel — não emitem.
 - `log` e `note` são aliases legados de `private`. Comportamento idêntico.
+- A seção EVENTOS RELEVANTES comprime por idade: os ~5 eventos mais recentes mostram o detalhe livre completo; os mais antigos colapsam para `verbo objeto` + kvs (`ref:`/`result:`/`spec:`/…). Texto livre no detalhe é **efêmero** no painel — o que precisa persistir vai em kvs ou `msg/`. Tunável via `MYCO_LOD_K` (0 desativa).
 
 ## Lint automático
 

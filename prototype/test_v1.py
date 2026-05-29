@@ -2878,6 +2878,64 @@ class TestReplyFallbackOnReMismatch:
 # Win 1 — lint warnings on wrong-verb usage
 # ============================================================
 
+class TestLodByAge:
+    """Level-of-detail by age: the K most-recent events keep their free-text
+    detail in the panel; older ones collapse to headline + kvs so a long
+    session's panel stays roughly constant in size. The auditable kvs
+    (ref/result/spec/...) always survive — only ephemeral prose is shed."""
+
+    def _seed(self, n):
+        idx = SwarmIndex()
+        for i in range(n):
+            # each event carries distinctive prose + kvs we can assert on
+            idx.apply(parse_event(
+                "AUTH", f"T{i} AUTH done uc-{i:03d} prosa{i} ref:r{i} result:ok"))
+        return idx
+
+    def test_recent_events_keep_full_detail(self):
+        idx = self._seed(3)
+        view = render_view(idx, "AUTH", lod_k=5)  # K >= count → all full
+        assert "prosa0" in view and "prosa1" in view and "prosa2" in view
+
+    def test_old_events_collapse_dropping_prose(self):
+        idx = self._seed(8)
+        view = render_view(idx, "AUTH", lod_k=3)
+        # last 3 (uc-005..007) keep prose; older ones drop it
+        assert "prosa7" in view and "prosa6" in view and "prosa5" in view
+        assert "prosa0" not in view and "prosa4" not in view
+
+    def test_collapsed_events_keep_kvs(self):
+        idx = self._seed(8)
+        view = render_view(idx, "AUTH", lod_k=3)
+        # the oldest event lost its prose but its kvs skeleton survives
+        assert "prosa0" not in view
+        assert "ref:r0" in view and "result:ok" in view
+        assert "done uc-000" in view
+
+    def test_lod_k_zero_disables_compression(self):
+        idx = self._seed(8)
+        view = render_view(idx, "AUTH", lod_k=0)
+        for i in range(8):
+            assert f"prosa{i}" in view, f"prosa{i} should be present with K=0"
+
+    def test_kvs_only_event_renders_identically(self):
+        """An event with no free text (the common `done X ref result` case)
+        loses nothing when collapsed."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done uc-000 ref:r0 result:ok"))
+        for i in range(1, 6):
+            idx.apply(parse_event("AUTH", f"T{i} AUTH start uc-{i:03d}"))
+        view = render_view(idx, "AUTH", lod_k=2)  # uc-000 is now old/collapsed
+        assert "done uc-000 ref:r0 result:ok" in view
+
+    def test_default_k_from_env(self, monkeypatch):
+        monkeypatch.setenv("MYCO_LOD_K", "2")
+        idx = self._seed(5)
+        view = render_view(idx, "AUTH")  # no explicit lod_k → reads env
+        assert "prosa4" in view and "prosa3" in view
+        assert "prosa0" not in view
+
+
 class TestLintWrongVerb:
     """Silent semantic misses — `reply` without a pending ask, or `private`
     while a peer is waiting on you — were the most-corroborated pain across

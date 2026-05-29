@@ -666,6 +666,35 @@ def _parse_ts(ts_str: str) -> float:
         return 0.0
 
 
+def _default_lod_k() -> int:
+    """How many of the most-recent events keep their free-text detail in the
+    panel. Older events collapse to headline + kvs (LOD-by-age). Tunable via
+    MYCO_LOD_K; a non-positive or unparsable value disables compression."""
+    try:
+        return int(os.environ.get("MYCO_LOD_K", "5"))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _render_event_line(ev, full: bool) -> str:
+    """Render one event for the EVENTOS RELEVANTES block.
+
+    full=True  → headline + full detail (free text + kvs), as authored.
+    full=False → headline + kvs only; the free-text prose is dropped so a
+                 long session's panel stays roughly constant in size. The
+                 kvs (ref/result/spec/addr/...) always survive — they're the
+                 auditable skeleton; only the ephemeral prose is shed.
+    """
+    head = f"{ev['ts']} {ev['session']} {ev['verb']} {ev['obj']}".rstrip()
+    if full:
+        return f"{head} {ev['detail']}".rstrip() if ev["detail"] else head
+    kvs = ev.get("kvs", {})
+    if not kvs:
+        return head
+    kv_str = " ".join(f"{k}:{v}" for k, v in kvs.items())
+    return f"{head} {kv_str}"
+
+
 def _age_label(ts_str: str) -> str:
     """Human-readable age from an ISO timestamp."""
     epoch = _parse_ts(ts_str)
@@ -680,7 +709,7 @@ def _age_label(ts_str: str) -> str:
 
 
 def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
-                session_dirs: dict = None) -> str:
+                session_dirs: dict = None, lod_k: int = None) -> str:
     # Defensive normalization: every other path normalizes to upper, but
     # this entrypoint is public and some callers (myco_view CLI) pass
     # user input directly.
@@ -889,12 +918,16 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
 
     lines.append("## EVENTOS RELEVANTES (últimos 15)")
     if events:
+        # LOD-by-age: the K most-recent events keep their full detail; older
+        # ones collapse to headline + kvs so the panel doesn't grow without
+        # bound across a long session. events is oldest-first, so the tail is
+        # the freshest. lod_k <= 0 disables compression (everything full).
+        if lod_k is None:
+            lod_k = _default_lod_k()
+        full_from = 0 if lod_k <= 0 else max(0, len(events) - lod_k)
         lines.append("```")
-        for ev in events:
-            line = f"{ev['ts']} {ev['session']} {ev['verb']} {ev['obj']}"
-            if ev["detail"]:
-                line += f" {ev['detail']}"
-            lines.append(line)
+        for idx, ev in enumerate(events):
+            lines.append(_render_event_line(ev, full=idx >= full_from))
         lines.append("```")
     else:
         lines.append("Nada recente.")
