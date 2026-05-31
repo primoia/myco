@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/primoia-myco.svg)](https://pypi.org/project/primoia-myco/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-285_passing-brightgreen.svg)](prototype/README.md)
+[![tests](https://github.com/primoia/myco/actions/workflows/tests.yml/badge.svg)](https://github.com/primoia/myco/actions/workflows/tests.yml)
 [![Status](https://img.shields.io/badge/status-v1.1_stable-green.svg)](docs/PROTOCOL.md)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](pyproject.toml)
 
@@ -209,7 +209,7 @@ The daemon exposes an HTTP API for cross-VM use:
 - [`docs/CONCEPT.md`](docs/CONCEPT.md) — the full idea, principles, reasoning
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — v1 protocol specification
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — daemon and hooks architecture
-- [`prototype/`](prototype/) — daemon, hooks, tests (285 unit tests passing)
+- [`prototype/`](prototype/) — daemon, hooks, tests (296 unit tests passing)
 - [`examples/three-services/`](examples/three-services/) — example with SN + SM + IAM
 - [`swarm/`](swarm/) — `CLAUDE.md` templates for sessions and DIRECTOR
 
@@ -228,7 +228,7 @@ The daemon runs on a central machine. Sessions on any VM point `MYCO_URL` to it.
 
 ## Status
 
-**v1.1** — Stable protocol, validated with real sessions across distributed VMs. 285 unit tests passing.
+**v1.1** — Stable protocol, validated with real sessions across distributed VMs. 296 unit tests passing.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 

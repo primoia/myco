@@ -10,7 +10,7 @@ Complete implementation of the myco v1 protocol. Daemon, Claude Code hooks, and 
 | `myco-hook.py` | Stop hook: captures `<myco>` blocks → POST /events to the daemon |
 | `myco_prompt_hook.py` | UserPromptSubmit hook: injects the view as additionalContext |
 | `myco_view.py` | Library + CLI to render views on demand |
-| `test_v1.py` | Test suite: **285 unit tests** covering full functionality (+ 5 integration tests in `test_multi_tenant.py` that require a running daemon) |
+| `test_v1.py` | Test suite: **296 unit tests** covering full functionality (+ 5 integration tests in `test_multi_tenant.py`, a standalone script that starts its own daemon) |
 
 ## Running the daemon
 
@@ -46,7 +46,7 @@ cd prototype
 python3 -m pytest test_v1.py -v
 ```
 
-285 tests covering:
+296 tests covering:
 
 - Event and key:value parsing
 - SwarmIndex (status, needs/provides, blockers, dependents)

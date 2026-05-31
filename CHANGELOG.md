@@ -15,6 +15,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **GitHub Actions CI** (`.github/workflows/tests.yml`): runs the unit suite + the multi-tenant integration script on Python 3.8–3.12 for every push and PR to `main`. README test badge is now the live CI status badge.
+- **LOD-by-age panel compression** (FEEDBACK #5, low-risk slice): the `EVENTOS RELEVANTES` section keeps full free-text detail only for the K most-recent events; older ones collapse to headline + kvs (`ref:`/`result:`/`spec:`/…), so a long session's panel stays roughly constant in size. The auditable kv skeleton always survives — only ephemeral prose is shed. Pure render-time policy (no hook/wire/log changes); tunable via `MYCO_LOD_K` (0 disables). +6 tests.
+- **Dangling-`spec:` lint** (FEEDBACK #1): the daemon now warns when an event references `spec:msg/X.md` whose file doesn't exist yet, instead of silently leaving the recipient with a 404. Inline `msgs:` written in the same POST pass without warning. +5 tests.
+
+### Fixed
+- `prototype/conftest.py` excludes `test_multi_tenant.py` (a standalone integration script) from pytest collection, so a bare `pytest` run reports only the real unit suite instead of false `ConnectionError`s.
+- Test count corrected to 296 across README / README.pt-BR / prototype/README.
+
+### Added (earlier)
 - **README polished for HN audience.** New TL;DR "Problem/myco is" at the top (2-line scanner version, with the mycelium metaphor demoted to a blockquote below it). New "Comparison with alternatives" section (vs LangGraph/CrewAI/AutoGen, tmux, chat tabs) that anticipates the predictable "but why not X?" thread questions. New "Two sessions chatting in 60 seconds" minimal runnable demo using `pip install` + `python3 -c 'import secrets'` (no openssl required). Explicit Python version check at install. Placeholder block for `docs/demo.gif` hero image with full recording recipe at [`docs/RECORD-DEMO-GIF.md`](docs/RECORD-DEMO-GIF.md) (vhs script + asciinema fallback).
 - All relative README links audited (13/13 resolve correctly).
 - Tests badge now links to `prototype/README.md` (which documents the suite) instead of the raw test file.

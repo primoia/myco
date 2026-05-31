@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/primoia-myco.svg)](https://pypi.org/project/primoia-myco/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-285_passing-brightgreen.svg)](prototype/README.md)
+[![tests](https://github.com/primoia/myco/actions/workflows/tests.yml/badge.svg)](https://github.com/primoia/myco/actions/workflows/tests.yml)
 [![Status](https://img.shields.io/badge/status-v1.1_stable-green.svg)](docs/PROTOCOL.md)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](pyproject.toml)
 
@@ -149,7 +149,7 @@ O daemon expõe uma API HTTP para uso cross-VM:
 - [`docs/CONCEPT.md`](docs/CONCEPT.md) — a ideia completa, princípios e raciocínio
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — especificação do protocolo v1
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — arquitetura do daemon e hooks
-- [`prototype/`](prototype/) — daemon, hooks, testes (285 testes unitários)
+- [`prototype/`](prototype/) — daemon, hooks, testes (296 testes unitários)
 - [`examples/three-services/`](examples/three-services/) — exemplo com SN + SM + IAM
 - [`examples/heterogeneous-swarm/`](examples/heterogeneous-swarm/) — duelo Claude × DeepSeek (3 rounds + auto-avaliações)
 - [`swarm/`](swarm/) — templates de CLAUDE.md para sessões e DIRECTOR
@@ -169,7 +169,7 @@ O daemon roda numa máquina central. Sessões em qualquer VM apontam `MYCO_URL` 
 
 ## Status
 
-**v1.1** — Protocolo estável, validado com sessões reais em VMs distribuídas. 285 testes unitários passando.
+**v1.1** — Protocolo estável, validado com sessões reais em VMs distribuídas. 296 testes unitários passando.
 
 Veja [`CHANGELOG.md`](CHANGELOG.md) para o histórico de versões.
 
