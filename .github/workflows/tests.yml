@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Runtime is stdlib-only; the [test] extra pulls pytest + requests.
+      - name: Install
+        run: pip install -e ".[test]"
+
+      # Unit suite: self-contained (in-process HTTP server on an ephemeral
+      # port, no external daemon needed).
+      - name: Unit tests (protocol v1)
+        working-directory: prototype
+        run: pytest test_v1.py -q
+
+      # Integration smoke test: spins up its own mycod subprocess and talks
+      # to it over HTTP. It is a standalone script, not a pytest module.
+      - name: Integration tests (multi-tenant HTTP)
+        working-directory: prototype
+        run: python test_multi_tenant.py
