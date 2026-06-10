@@ -667,6 +667,30 @@ class SwarmIndex:
             })
         return pending
 
+    def open_asks_for(self, viewer: str = None):
+        """All unresolved asks across the swarm, oldest first — the stalls a
+        human needs to see to know who to poke (MAESTRO-010 follow-up).
+        No TTL on purpose: an old unanswered ask is exactly the signal.
+        Channel-scoped to `viewer` when given so private-channel asks don't
+        leak to bystanders. Returns (ts, frm, to, summary) tuples."""
+        out = []
+        for ts, frm, to, detail in self.questions:
+            if (frm, to, ts) in self.resolved_questions:
+                continue
+            text, kvs = parse_detail_kvs(detail)
+            spec_id = kvs.get("spec")
+            if spec_id and spec_id in self.answered_specs:
+                continue
+            if viewer is not None and viewer not in (frm, to):
+                chans = {c for c in kvs.get("channel", "").split(",") if c} \
+                    or {GLOBAL_CHANNEL}
+                my_chans = self.session_channels.get(viewer, {GLOBAL_CHANNEL})
+                if GLOBAL_CHANNEL not in chans and not (chans & my_chans):
+                    continue
+            summary = text.split()[0] if text.strip() else (spec_id or "?")
+            out.append((ts, frm, to, summary))
+        return out
+
     def recent_events_for(self, session: str, limit=15):
         relevant = []
         for ev in reversed(self.events):
@@ -800,6 +824,16 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
         else:
             if status != "blocked":
                 lines.append("Nenhum bloqueador conhecido.")
+    # Swarm-wide pending-asks counter: lets the human spot a stalled
+    # handoff (and who to poke) without asking the coordinator. Shown in
+    # every panel — each session sees the (channel-scoped) global picture.
+    open_asks = index.open_asks_for(session)
+    if open_asks:
+        shown = ", ".join(
+            f"{frm}→{to} ({obj[:40]})" for ts, frm, to, obj in open_asks[:5]
+        )
+        extra = f" … +{len(open_asks) - 5}" if len(open_asks) > 5 else ""
+        lines.append(f"Swarm: **{len(open_asks)} ask(s) pendentes** — {shown}{extra}")
     lines.append("")
 
     lines.append("## DIRETIVAS")

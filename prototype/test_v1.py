@@ -3473,6 +3473,64 @@ class TestScanChronologicalMerge:
         assert verbs == ["start", "done"]
 
 
+# ============================================================
+# MAESTRO follow-up: swarm-wide pending-asks counter in the panel
+# ============================================================
+
+class TestSwarmPendingCounter:
+    """A stalled handoff was invisible unless you were the ask's target.
+    Every panel now carries a top line with the swarm's open asks so the
+    human knows who to poke without asking the coordinator."""
+
+    def test_counter_visible_to_third_party(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "T0 DEV ask E2E arbitrar-uc-035"))
+        view = render_view(idx, "MAESTRO")
+        assert "1 ask(s) pendentes" in view
+        assert "DEV→E2E (arbitrar-uc-035)" in view
+
+    def test_counter_absent_when_no_open_asks(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "T0 DEV start tarefa"))
+        view = render_view(idx, "MAESTRO")
+        assert "ask(s) pendentes" not in view
+
+    def test_resolved_ask_leaves_counter(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "T0 DEV ask E2E arbitrar-uc-035"))
+        idx.apply(parse_event("E2E", "T1 E2E reply DEV arbitrado-verde"))
+        view = render_view(idx, "MAESTRO")
+        assert "ask(s) pendentes" not in view
+
+    def test_director_panel_has_counter(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "T0 DEV ask E2E arbitrar-uc-035"))
+        view = render_view(idx, "DIRECTOR")
+        assert "1 ask(s) pendentes" in view
+
+    def test_channel_scoped_ask_hidden_from_bystander(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("A", "T0 A ask B revisar channel:review-42"))
+        assert "ask(s) pendentes" not in render_view(idx, "C")
+        # Members still see it
+        assert "1 ask(s) pendentes" in render_view(idx, "B")
+        assert "1 ask(s) pendentes" in render_view(idx, "A")
+
+    def test_counter_caps_at_five_with_overflow(self):
+        idx = SwarmIndex()
+        for i in range(7):
+            idx.apply(parse_event("DEV", f"T{i} DEV ask S{i} pergunta-{i}"))
+        view = render_view(idx, "MAESTRO")
+        assert "7 ask(s) pendentes" in view
+        assert "… +2" in view
+
+    def test_spec_only_ask_uses_spec_as_summary(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("E2E", "T0 E2E ask DEV spec:msg/E2E-006.md"))
+        view = render_view(idx, "MAESTRO")
+        assert "E2E→DEV (msg/E2E-006.md)" in view
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
