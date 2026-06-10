@@ -434,6 +434,10 @@ class SwarmIndex:
         c. any event carrying `spec:msg/X.md` whose file doesn't exist yet →
            warn about a dangling pointer (recipient would get a 404). Inline
            `msgs:` are written before ingest, so a correct inline use passes.
+        d. `done`/`start` while ask(s) are pending for the sender → the
+           session is closing (or moving to) a turn with an unanswered
+           handoff in its own queue; the chain silently stalls until a
+           human pokes it (MAESTRO-010 P2).
         """
         warnings = []
         s = ev["session"]
@@ -467,6 +471,26 @@ class SwarmIndex:
                     f"{verb}: peers can't see this. You have pending ask(s) "
                     f"from {ask_list} — if you're answering, use "
                     f"`reply <session>` instead."
+                )
+
+        # d. done/start with pending asks for the sender → likely a
+        # swallowed handoff: the work chain stalls until someone notices.
+        if verb in ("done", "start"):
+            pending = [
+                (q_frm, q_detail)
+                for q_ts, q_frm, q_to, q_detail in self.questions
+                if q_to == s and _is_open(q_frm, q_to, q_ts)
+            ]
+            if pending:
+                def _short(d):
+                    return d if len(d) <= 60 else d[:57] + "..."
+                summary = "; ".join(
+                    f"{frm}→you: {_short(d)}" for frm, d in pending[:3]
+                )
+                warnings.append(
+                    f"{verb} with {len(pending)} pending ask(s) for you "
+                    f"({summary}). Reply or acknowledge before closing "
+                    f"the turn."
                 )
 
         # c. spec: pointer to a msg that doesn't exist → dangling reference
@@ -657,6 +681,12 @@ class SwarmIndex:
 
 QUESTION_TTL_SECONDS = 1800  # 30 minutes
 
+# Panel diet (MAESTRO-010 P1): the injected panel must stay under the
+# ~10KB hook-inline limit or every session pays an extra Read per prompt.
+# Full history survives in log/ and git; the panel is a working set.
+ARTIFACTS_PANEL_CAP = 15        # newest deduped artifacts shown
+BROADCAST_TTL_SECONDS = 48 * 3600  # broadcasts older than this drop off
+
 
 def _parse_ts(ts_str: str) -> float:
     """Parse ISO timestamp to epoch seconds. Returns 0.0 on failure."""
@@ -794,7 +824,9 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
         seen = {}
         for a in index.artifacts:
             seen[(a["session"], a["obj"])] = a
-        deduped = list(seen.values())
+        deduped = sorted(seen.values(), key=lambda a: a["ts"])
+        omitted = max(0, len(deduped) - ARTIFACTS_PANEL_CAP)
+        deduped = deduped[-ARTIFACTS_PANEL_CAP:]
         lines.append("| sessão | artefato | ref | result | path | spec |")
         lines.append("|---|---|---|---|---|---|")
         for a in deduped:
@@ -804,6 +836,8 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
             spec = a["spec"] or "—"
             path = s_dir or "—"
             lines.append(f"| {a['session']} | {a['obj']} | {ref} | {result} | {path} | {spec} |")
+        if omitted:
+            lines.append(f"_… {omitted} artefato(s) mais antigos fora do painel (histórico completo no log/git)._")
     else:
         lines.append("Nenhum artefato publicado.")
     lines.append("")
@@ -862,11 +896,15 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
             lines.append("Nenhum conflito detectado.")
         lines.append("")
 
-    # BROADCASTS (say verb) — respect channel scope
+    # BROADCASTS (say verb) — respect channel scope; TTL keeps stale
+    # announcements from being re-injected into every prompt for weeks.
+    # Unparsable timestamps stay visible (defensive).
     my_chans = index.session_channels.get(session, {GLOBAL_CHANNEL})
+    bcast_cutoff = now - BROADCAST_TTL_SECONDS
     visible_bcasts = [
         (ts, sender, text) for ts, sender, text, chans in index.broadcasts[-50:]
-        if sender == session or GLOBAL_CHANNEL in chans or (chans & my_chans)
+        if (sender == session or GLOBAL_CHANNEL in chans or (chans & my_chans))
+        and (_parse_ts(ts) == 0.0 or _parse_ts(ts) >= bcast_cutoff)
     ][-5:]
     if visible_bcasts:
         lines.append("## BROADCASTS")
@@ -1098,7 +1136,14 @@ class Daemon:
                 self.offsets[session] = 0
                 self.buffers[session] = ""
 
-        # Read deltas
+        # Read deltas. Collect lines from ALL files first, then apply in
+        # timestamp order: applying file-by-file leaves self.events grouped
+        # by session whenever more than one file has a backlog (startup
+        # rebuild being the worst case), and the panel's "recent events"
+        # comes out mono-session (MAESTRO-010 P3). Log lines start with an
+        # ISO timestamp, which sorts lexicographically; the sort is stable,
+        # so same-second lines keep their per-file order.
+        pending_lines = []
         for session in list(self.offsets.keys()):
             log_file = self.log_dir / f"{session}.log"
             try:
@@ -1126,8 +1171,12 @@ class Daemon:
             # a partial line we need to buffer
             self.buffers[session] = lines[-1]
             for line in lines[:-1]:
-                if self.process_line(session, line):
-                    changed = True
+                pending_lines.append((line.split(" ", 1)[0], session, line))
+
+        pending_lines.sort(key=lambda t: t[0])
+        for _, session, line in pending_lines:
+            if self.process_line(session, line):
+                changed = True
 
         return changed
 

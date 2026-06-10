@@ -3275,6 +3275,204 @@ class TestInlineMsgs:
             server.shutdown()
 
 
+# ============================================================
+# MAESTRO-010 P1: panel diet — artifacts cap + broadcast TTL
+# ============================================================
+
+class TestArtifactsPanelCap:
+    """The injected panel must stay under the hook's ~10KB inline limit.
+    ARTEFATOS PUBLICADOS was the biggest slice (~78 rows accumulated);
+    the panel now shows only the newest ARTIFACTS_PANEL_CAP after dedup."""
+
+    def test_cap_keeps_newest_only(self):
+        from mycod import ARTIFACTS_PANEL_CAP
+        idx = SwarmIndex()
+        total = ARTIFACTS_PANEL_CAP + 5
+        for i in range(total):
+            idx.apply(parse_event("DEV", f"2026-06-01T00:00:{i:02d} DEV done task-{i:02d} result:ok"))
+        view = render_view(idx, "DEV")
+        section = view.split("## ARTEFATOS PUBLICADOS")[1].split("##")[0]
+        for i in range(5):
+            assert f"task-{i:02d}" not in section, f"old artifact task-{i:02d} should be capped out"
+        for i in range(5, total):
+            assert f"task-{i:02d}" in section
+        assert "5 artefato(s) mais antigos fora do painel" in section
+
+    def test_under_cap_shows_all_no_note(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "2026-06-01T00:00:00 DEV done task-a result:ok"))
+        idx.apply(parse_event("DEV", "2026-06-01T00:00:01 DEV done task-b result:ok"))
+        view = render_view(idx, "DEV")
+        section = view.split("## ARTEFATOS PUBLICADOS")[1].split("##")[0]
+        assert "task-a" in section and "task-b" in section
+        assert "fora do painel" not in section
+
+    def test_republished_artifact_survives_cap(self):
+        """A re-done (session, obj) keeps its dedup slot but must rank by its
+        NEWEST ts — otherwise a fresh re-publish gets dropped as 'old'."""
+        from mycod import ARTIFACTS_PANEL_CAP
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "2026-06-01T00:00:00 DEV done api ref:v1.0"))
+        for i in range(ARTIFACTS_PANEL_CAP):
+            idx.apply(parse_event("DEV", f"2026-06-01T00:01:{i:02d} DEV done task-{i:02d}"))
+        # Re-publish api with the newest timestamp of all
+        idx.apply(parse_event("DEV", "2026-06-01T00:02:00 DEV done api ref:v2.0"))
+        view = render_view(idx, "DEV")
+        section = view.split("## ARTEFATOS PUBLICADOS")[1].split("##")[0]
+        assert "v2.0" in section
+
+
+class TestBroadcastTTL:
+    """A 'DEV online' say from 12 days ago was being re-injected into every
+    prompt of every session. Broadcasts now expire after BROADCAST_TTL_SECONDS."""
+
+    @staticmethod
+    def _broadcasts_section(view):
+        if "## BROADCASTS" not in view:
+            return ""
+        return view.split("## BROADCASTS")[1].split("##")[0]
+
+    def test_stale_broadcast_dropped(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "2026-05-29T10:00:00 DEV say dev-online-aguardando"))
+        view = render_view(idx, "E2E")
+        assert "dev-online-aguardando" not in self._broadcasts_section(view)
+
+    def test_fresh_broadcast_kept(self):
+        import time as _time
+        idx = SwarmIndex()
+        now_ts = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        idx.apply(parse_event("DEV", f"{now_ts} DEV say deploy-as-15h"))
+        view = render_view(idx, "E2E")
+        assert "deploy-as-15h" in self._broadcasts_section(view)
+
+    def test_unparsable_ts_kept_defensively(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", "T0 DEV say hello-swarm"))
+        view = render_view(idx, "E2E")
+        assert "hello-swarm" in self._broadcasts_section(view)
+
+
+# ============================================================
+# MAESTRO-010 P2: lint — done/start with pending asks (swallowed handoff)
+# ============================================================
+
+class TestLintSwallowedHandoff:
+    """Twice in one day a session closed its turn (`done`) with an ask
+    already pending in its own queue — the chain stalled ~2h until a human
+    poked it. The daemon now warns on done/start with pending asks."""
+
+    def _ev(self, session, line):
+        return parse_event(session, line)
+
+    def test_done_with_pending_ask_warns(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("DEV", "T0 DEV ask E2E arbitrar-uc-038"))
+        warnings = idx.lint_event(self._ev("E2E", "T1 E2E done outra-tarefa result:ok"))
+        assert len(warnings) == 1
+        assert "1 pending ask(s) for you" in warnings[0]
+        assert "DEV→you: arbitrar-uc-038" in warnings[0]
+        assert "before closing the turn" in warnings[0]
+
+    def test_start_with_pending_ask_warns(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("DEV", "T0 DEV ask E2E arbitrar-uc-038"))
+        warnings = idx.lint_event(self._ev("E2E", "T1 E2E start outra-coisa"))
+        assert len(warnings) == 1
+        assert "start with 1 pending ask(s)" in warnings[0]
+
+    def test_done_without_pending_ask_no_warning(self):
+        idx = SwarmIndex()
+        assert idx.lint_event(self._ev("E2E", "T0 E2E done tarefa result:ok")) == []
+
+    def test_done_with_ask_for_other_session_no_warning(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("DEV", "T0 DEV ask FRONT revisar-tela"))
+        assert idx.lint_event(self._ev("E2E", "T1 E2E done tarefa")) == []
+
+    def test_done_after_reply_no_warning(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("DEV", "T0 DEV ask E2E arbitrar-uc-038"))
+        idx.apply(self._ev("E2E", "T1 E2E reply DEV arbitrado-verde"))
+        assert idx.lint_event(self._ev("E2E", "T2 E2E done arbitragem result:ok")) == []
+
+    def test_done_with_multiple_pending_asks_counts_all(self):
+        idx = SwarmIndex()
+        idx.apply(self._ev("DEV", "T0 DEV ask E2E pergunta-um"))
+        idx.apply(self._ev("FRONT", "T1 FRONT ask E2E pergunta-dois"))
+        warnings = idx.lint_event(self._ev("E2E", "T2 E2E done tarefa"))
+        assert len(warnings) == 1
+        assert "2 pending ask(s)" in warnings[0]
+        assert "DEV" in warnings[0] and "FRONT" in warnings[0]
+
+    def test_own_ask_to_peer_does_not_warn_own_done(self):
+        """Asks YOU sent (waiting on a peer) must not flag your own done."""
+        idx = SwarmIndex()
+        idx.apply(self._ev("E2E", "T0 E2E ask DEV qual-branch"))
+        assert idx.lint_event(self._ev("E2E", "T1 E2E done suite-rodada result:ok")) == []
+
+
+# ============================================================
+# MAESTRO-010 P3: chronological merge across log files in scan_once
+# ============================================================
+
+class TestScanChronologicalMerge:
+    """On a daemon restart every log file has a full backlog; applying them
+    file-by-file leaves index.events grouped by session, so the panel's
+    'last 15 events' renders mono-session. scan_once now merges all files'
+    pending lines in timestamp order."""
+
+    def test_rebuild_interleaves_sessions_chronologically(self, tmp_path):
+        from mycod import Daemon
+        (tmp_path / "log").mkdir(parents=True, exist_ok=True)
+        # Two files, interleaved timestamps, written whole (= restart backlog)
+        (tmp_path / "log" / "AAA.log").write_text(
+            "2026-06-10T08:00:00 AAA start tarefa-a\n"
+            "2026-06-10T10:00:00 AAA done tarefa-a result:ok\n"
+        )
+        (tmp_path / "log" / "BBB.log").write_text(
+            "2026-06-10T09:00:00 BBB start tarefa-b\n"
+            "2026-06-10T11:00:00 BBB done tarefa-b result:ok\n"
+        )
+        d = Daemon(tmp_path)
+        d.scan_once()
+        ts_order = [ev["ts"] for ev in d.index.events]
+        assert ts_order == sorted(ts_order), f"events not chronological: {ts_order}"
+        sessions_in_order = [ev["session"] for ev in d.index.events]
+        assert sessions_in_order == ["AAA", "BBB", "AAA", "BBB"]
+
+    def test_recent_events_show_all_sessions_after_rebuild(self, tmp_path):
+        """The user-visible symptom: a panel rendered right after restart
+        showed only one session's history. With ≥15 events in the last file,
+        the other sessions' newer events were pushed out entirely."""
+        from mycod import Daemon
+        (tmp_path / "log").mkdir(parents=True, exist_ok=True)
+        many = "".join(
+            f"2026-06-10T08:00:{i:02d} AAA private nota-{i:02d}\n" for i in range(20)
+        )
+        (tmp_path / "log" / "AAA.log").write_text(many)
+        (tmp_path / "log" / "BBB.log").write_text(
+            "2026-06-10T12:00:00 BBB done evento-mais-novo result:ok\n"
+        )
+        d = Daemon(tmp_path)
+        d.scan_once()
+        view = render_view(d.index, "AAA")
+        events_section = view.split("## EVENTOS RELEVANTES")[1].split("##")[0]
+        assert "evento-mais-novo" in events_section
+
+    def test_same_second_keeps_per_file_order(self, tmp_path):
+        from mycod import Daemon
+        (tmp_path / "log").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "log" / "AAA.log").write_text(
+            "2026-06-10T08:00:00 AAA start primeiro\n"
+            "2026-06-10T08:00:00 AAA done primeiro result:ok\n"
+        )
+        d = Daemon(tmp_path)
+        d.scan_once()
+        verbs = [ev["verb"] for ev in d.index.events]
+        assert verbs == ["start", "done"]
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
