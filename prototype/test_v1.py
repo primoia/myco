@@ -3530,6 +3530,14 @@ class TestSwarmPendingCounter:
         view = render_view(idx, "MAESTRO")
         assert "E2E→DEV (msg/E2E-006.md)" in view
 
+    def test_ancient_ask_outside_window_excluded(self):
+        """Replaying the full log surfaces weeks-old asks settled out-of-band;
+        the counter only shows the 48h window (archaeology isn't actionable)."""
+        idx = SwarmIndex()
+        idx.apply(parse_event("A", "2026-01-01T00:00:00 A ask B pergunta-fossil"))
+        view = render_view(idx, "MAESTRO")
+        assert "ask(s) pendentes" not in view
+
 
 if __name__ == "__main__":
     import pytest

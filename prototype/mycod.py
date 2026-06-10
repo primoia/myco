@@ -667,15 +667,22 @@ class SwarmIndex:
             })
         return pending
 
-    def open_asks_for(self, viewer: str = None):
-        """All unresolved asks across the swarm, oldest first — the stalls a
+    def open_asks_for(self, viewer: str = None,
+                      max_age_seconds: float = 48 * 3600):
+        """Unresolved asks across the swarm, oldest first — the stalls a
         human needs to see to know who to poke (MAESTRO-010 follow-up).
-        No TTL on purpose: an old unanswered ask is exactly the signal.
-        Channel-scoped to `viewer` when given so private-channel asks don't
-        leak to bystanders. Returns (ts, frm, to, summary) tuples."""
+        Limited to the last `max_age_seconds` (48h default): replaying the
+        full log surfaces weeks-old asks that were settled out-of-band —
+        archaeology, not actionable stalls. Channel-scoped to `viewer` when
+        given so private-channel asks don't leak to bystanders.
+        Returns (ts, frm, to, summary) tuples."""
         out = []
+        now = time.time()
         for ts, frm, to, detail in self.questions:
             if (frm, to, ts) in self.resolved_questions:
+                continue
+            epoch = _parse_ts(ts)
+            if epoch > 0 and (now - epoch) > max_age_seconds:
                 continue
             text, kvs = parse_detail_kvs(detail)
             spec_id = kvs.get("spec")
@@ -723,11 +730,14 @@ def _parse_ts(ts_str: str) -> float:
 def _default_lod_k() -> int:
     """How many of the most-recent events keep their free-text detail in the
     panel. Older events collapse to headline + kvs (LOD-by-age). Tunable via
-    MYCO_LOD_K; a non-positive or unparsable value disables compression."""
+    MYCO_LOD_K; a non-positive or unparsable value disables compression.
+    Default dropped 5→3 (MAESTRO-010 pre-authorized): two ~1KB events in
+    the full-detail window were enough to push panels past the ~10KB
+    hook-inline limit again."""
     try:
-        return int(os.environ.get("MYCO_LOD_K", "5"))
+        return int(os.environ.get("MYCO_LOD_K", "3"))
     except (TypeError, ValueError):
-        return 5
+        return 3
 
 
 def _render_event_line(ev, full: bool) -> str:
