@@ -1170,7 +1170,20 @@ class Daemon:
         return changed
 
     def scan_once(self) -> bool:
-        """Check all log files for new content. Returns True if state changed."""
+        """Check all log files for new content. Returns True if state changed.
+
+        Holds self.lock for the whole pass: ingest_events (HTTP thread)
+        writes the log file, applies the events inline and THEN advances
+        the offset — all under this same lock. An unlocked scanner could
+        slip into that window, re-apply the just-written lines and shove
+        the offset past the real file size, which the truncation branch
+        below then misreads as a rewritten file and replays the WHOLE log
+        into the index (every event duplicated; seen live 2026-06-11 as
+        a triplicated ask)."""
+        with self.lock:
+            return self._scan_once_locked()
+
+    def _scan_once_locked(self) -> bool:
         changed = False
 
         # Discover any new log files
@@ -1285,7 +1298,8 @@ class TenantManager:
                     (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
                     daemon.index.sessions_known.add("DIRECTOR")
                     daemon.scan_once()
-                    daemon._render_to_cache()
+                    with daemon.lock:
+                        daemon._render_to_cache()
                     self.daemons[tenant_id] = daemon
                     if self.verbose:
                         print(f"[tenant-mgr] loaded tenant {tenant_id[:8]}...", file=sys.stderr)
@@ -1346,7 +1360,8 @@ class TenantManager:
                 (daemon.log_dir / "DIRECTOR.log").touch(exist_ok=True)
                 daemon.index.sessions_known.add("DIRECTOR")
                 daemon.scan_once()
-                daemon._render_to_cache()
+                with daemon.lock:
+                    daemon._render_to_cache()
                 self.daemons[tenant_id] = daemon
 
                 if self.verbose:
@@ -1366,13 +1381,14 @@ class TenantManager:
                 try:
                     changed = daemon.scan_once()
                     if changed:
-                        daemon._render_to_cache()
-                        # Also write to filesystem for local readers
-                        sessions = set(daemon.index.sessions_known) | {"DIRECTOR"}
-                        for s in sessions:
-                            content = daemon.view_cache.get(s, "")
-                            if content:
-                                write_view_atomic(daemon.view_dir / f"{s}.md", content)
+                        with daemon.lock:
+                            daemon._render_to_cache()
+                            # Also write to filesystem for local readers
+                            sessions = set(daemon.index.sessions_known) | {"DIRECTOR"}
+                            for s in sessions:
+                                content = daemon.view_cache.get(s, "")
+                                if content:
+                                    write_view_atomic(daemon.view_dir / f"{s}.md", content)
                 except Exception as e:
                     if self.verbose:
                         print(f"[tenant-mgr] error polling {tenant_id[:8]}...: {e}", file=sys.stderr)

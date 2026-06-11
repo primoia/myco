@@ -3539,6 +3539,65 @@ class TestSwarmPendingCounter:
         assert "ask(s) pendentes" not in view
 
 
+# ============================================================
+# 2026-06-11: ingest×scanner race → duplicated events in the index
+# ============================================================
+
+class TestIngestScannerRace:
+    """ingest_events (HTTP thread) wrote the log line, applied it inline and
+    only then advanced the offset — all under Daemon.lock — while scan_once
+    (poll thread) ran under the TenantManager lock only. The unlocked
+    scanner could re-apply just-ingested lines and push the offset past the
+    file size, which the truncation branch misread as a rewritten file and
+    replayed the whole log. Seen live: one ask triplicated, directives and
+    broadcasts duplicated. scan_once now takes Daemon.lock."""
+
+    def test_concurrent_ingest_and_scan_no_duplicates(self, tmp_path):
+        import threading
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        N_SESSIONS, N_EVENTS = 4, 50
+        stop = threading.Event()
+
+        def scanner():
+            while not stop.is_set():
+                d.scan_once()
+
+        def ingester(session):
+            for i in range(N_EVENTS):
+                d.ingest_events(session, [f"start tarefa-{i:03d}"])
+
+        scan_thread = threading.Thread(target=scanner)
+        scan_thread.start()
+        threads = [threading.Thread(target=ingester, args=(f"S{k}",))
+                   for k in range(N_SESSIONS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        stop.set()
+        scan_thread.join()
+        d.scan_once()  # final settle
+
+        total = N_SESSIONS * N_EVENTS
+        assert len(d.index.events) == total, (
+            f"{len(d.index.events)} events applied for {total} ingested — "
+            f"duplicates mean the scanner re-applied ingested lines"
+        )
+        # Offset must never exceed the real file size (spurious-truncation guard)
+        for k in range(N_SESSIONS):
+            session = f"S{k}"
+            size = (tmp_path / "log" / f"{session}.log").stat().st_size
+            assert d.offsets[session] == size
+
+    def test_scan_after_ingest_is_noop(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.ingest_events("AUTH", ["start login", "done login result:ok"])
+        assert not d.scan_once()
+        assert len(d.index.events) == 2
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
