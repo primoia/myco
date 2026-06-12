@@ -1142,6 +1142,38 @@ class Daemon:
             self._render_to_cache()
         return warnings
 
+    def poke_hints(self, session: str, event_lines: list) -> list:
+        """Human-facing dispatch hints for targeted verbs (ask/reply/direct).
+
+        Sessions don't wake on their own — the human is the scheduler. When
+        a turn hands work to a peer, the human reading THIS session's output
+        needs to know which session to poke for the handoff to be seen.
+        Called after ingest; the capture hook surfaces these to the human.
+        Returns dicts: {verb, target, summary, status, last_seen_age}.
+        """
+        hints = []
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        for ev_line in event_lines:
+            ev = parse_event(session, f"{ts} {session} {ev_line}")
+            if ev is None or ev["verb"] not in ("ask", "reply", "direct"):
+                continue
+            target = ev["obj"]
+            if not target or target in ("ALL", session):
+                continue
+            text, kvs = parse_detail_kvs(ev["detail"])
+            summary = text.split()[0] if text.strip() else kvs.get("spec", "")
+            with self.lock:
+                status = self.index.session_status.get(target, "unknown")
+                last_seen = self.index.last_seen.get(target, "")
+            hints.append({
+                "verb": ev["verb"],
+                "target": target,
+                "summary": summary,
+                "status": status,
+                "last_seen_age": _age_label(last_seen) if last_seen else "nunca visto",
+            })
+        return hints
+
     def _process_with_lint(self, session: str, line: str) -> tuple:
         """Parse, lint, then apply. Returns (changed_bool, warnings_list).
 
@@ -1555,6 +1587,11 @@ class MycoHandler(BaseHTTPRequestHandler):
             response = {"ok": True, "count": len(events)}
             if warnings:
                 response["warnings"] = warnings
+            # Dispatch hints: which session the human must poke for this
+            # handoff to be seen (the capture hook shows these to the human).
+            pokes = daemon.poke_hints(session, events)
+            if pokes:
+                response["pokes"] = pokes
             if msg_results:
                 response["msgs"] = msg_results
             self._respond(200, json.dumps(response),

@@ -3598,6 +3598,96 @@ class TestIngestScannerRace:
         assert len(d.index.events) == 2
 
 
+# ============================================================
+# 2026-06-12: poke hints — tell the human which session to poke
+# ============================================================
+
+class TestPokeHints:
+    """The swarm has no scheduler: an idle session only reads its panel when
+    the human prompts it. The daemon now returns dispatch hints on POST
+    /events for targeted verbs (ask/reply/direct), and the capture hook
+    shows them to the human ('cutuque DEV pra ler o painel')."""
+
+    def test_ask_to_idle_target_yields_hint(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        d.ingest_events("DEV", ["start tarefa", "done tarefa result:ok"])
+        hints = d.poke_hints("MAESTRO", ["ask DEV revisar-contrato spec:msg/X.md"])
+        assert len(hints) == 1
+        h = hints[0]
+        assert h["verb"] == "ask" and h["target"] == "DEV"
+        assert h["status"] == "idle"
+        assert h["summary"] == "revisar-contrato"
+        assert h["last_seen_age"] != "nunca visto"
+
+    def test_never_seen_target_says_so(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        hints = d.poke_hints("MAESTRO", ["direct GHOST faz-algo"])
+        assert hints[0]["status"] == "unknown"
+        assert hints[0]["last_seen_age"] == "nunca visto"
+
+    def test_untargeted_verbs_yield_no_hints(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        assert d.poke_hints("DEV", [
+            "start tarefa", "done tarefa result:ok", "say aviso-geral",
+            "up backend addr:http://x", "private nota",
+        ]) == []
+
+    def test_direct_all_yields_no_hint(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        assert d.poke_hints("DIRECTOR", ["direct ALL parem-tudo"]) == []
+
+    def test_spec_only_ask_uses_spec_as_summary(self, tmp_path):
+        from mycod import Daemon
+        d = Daemon(tmp_path)
+        hints = d.poke_hints("DEV", ["ask E2E spec:msg/DEV-015.md"])
+        assert hints[0]["summary"] == "msg/DEV-015.md"
+
+    def test_http_response_carries_pokes(self, tmp_path):
+        import json as _json
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            req = _auth_req(
+                f"http://127.0.0.1:{port}/events",
+                data=_json.dumps({"session": "MAESTRO",
+                                  "events": ["ask DEV revisar-contrato"]}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            body = _json.loads(urllib.request.urlopen(req).read())
+            assert body["ok"] is True
+            assert "pokes" in body
+            assert body["pokes"][0]["target"] == "DEV"
+        finally:
+            server.shutdown()
+
+    def test_http_response_omits_pokes_when_none(self, tmp_path):
+        import json as _json
+        server, port, _ = _make_channel_server(tmp_path)
+        try:
+            req = _auth_req(
+                f"http://127.0.0.1:{port}/events",
+                data=_json.dumps({"session": "X", "events": ["start task"]}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            body = _json.loads(urllib.request.urlopen(req).read())
+            assert "pokes" not in body
+        finally:
+            server.shutdown()
+
+    def test_hook_formats_notice(self):
+        import myco_hook
+        notice = myco_hook.format_poke_notice("MAESTRO", [
+            {"verb": "ask", "target": "DEV", "summary": "revisar-contrato",
+             "status": "idle", "last_seen_age": "2.1h"},
+        ])
+        assert "MAESTRO → ask DEV (revisar-contrato)" in notice
+        assert "DEV está idle (last-seen 2.1h)" in notice
+        assert "cutuque DEV" in notice
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

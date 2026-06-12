@@ -189,11 +189,14 @@ def _make_headers() -> dict:
     return headers
 
 
-def post_events_http(session: str, events: list) -> bool:
-    """POST events to the daemon via HTTP. Retries once before giving up."""
+def post_events_http(session: str, events: list) -> tuple:
+    """POST events to the daemon via HTTP. Retries once before giving up.
+
+    Returns (ok, response_dict). response_dict may carry "pokes" — dispatch
+    hints the daemon computed for targeted verbs (ask/reply/direct)."""
     url = os.environ.get("MYCO_URL")
     if not url:
-        return False
+        return False, {}
     data = json.dumps({"session": session, "events": events}).encode()
     for attempt in range(2):
         try:
@@ -203,14 +206,36 @@ def post_events_http(session: str, events: list) -> bool:
                 headers=_make_headers(),
             )
             with urllib.request.urlopen(req, timeout=2) as resp:
-                return resp.status == 200
+                if resp.status != 200:
+                    return False, {}
+                try:
+                    return True, json.loads(resp.read().decode("utf-8"))
+                except (json.JSONDecodeError, ValueError):
+                    return True, {}
         except Exception as e:
             if attempt == 0:
                 debug(f"HTTP POST attempt 1 failed ({e}), retrying in 100ms")
                 time.sleep(0.1)
             else:
                 debug(f"HTTP POST attempt 2 failed ({e}), falling back to filesystem")
-    return False
+    return False, {}
+
+
+def format_poke_notice(session: str, pokes: list) -> str:
+    """Human-facing dispatch notice. The swarm has no scheduler — an idle
+    session only reads its panel when the human prompts it. Whenever this
+    turn handed work to a peer (ask/reply/direct), tell the human which
+    session to poke, with enough context to judge urgency."""
+    now = time.strftime("%Y-%m-%d %H:%M")
+    lines = []
+    for p in pokes:
+        what = f" ({p['summary']})" if p.get("summary") else ""
+        lines.append(
+            f"🔔 myco [{now}] {session} → {p['verb']} {p['target']}{what}: "
+            f"{p['target']} está {p['status']} (last-seen {p['last_seen_age']}) "
+            f"— cutuque {p['target']} pra ler o painel"
+        )
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -245,8 +270,14 @@ def main() -> int:
         # Daemon is authoritative. If POST fails, drop the events on the
         # floor rather than silently writing them to a local swarm dir
         # the daemon doesn't know about.
-        if not post_events_http(session, events):
+        ok, response = post_events_http(session, events)
+        if not ok:
             debug(f"HTTP POST failed and MYCO_URL is set; {len(events)} event(s) dropped")
+        elif response.get("pokes"):
+            # Surface the dispatch notice to the human (systemMessage is
+            # rendered by Claude Code in the session the human is reading).
+            notice = format_poke_notice(session, response["pokes"])
+            print(json.dumps({"systemMessage": notice}))
     else:
         append_events_fs(session, events)
     return 0
