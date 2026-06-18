@@ -3,7 +3,7 @@
 # myco — launch a Claude Code session connected to a myco swarm
 #
 # Usage:
-#   myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume] [-- claude_flags...]
+#   myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume [SESSION_ID]] [-- claude_flags...]
 #
 # Examples:
 #   myco FRONT                                                    # session FRONT in current dir
@@ -26,7 +26,7 @@ set -euo pipefail
 MYCO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ $# -lt 1 ]; then
-    echo "usage: myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume] [-- claude_flags...]" >&2
+    echo "usage: myco <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume [SESSION_ID]] [-- claude_flags...]" >&2
     exit 2
 fi
 
@@ -40,6 +40,7 @@ shift
 PROJECT_DIR="."
 CLAUDE_ARGS=()
 RESUME=false
+RESUME_ID=""
 TENANT_TOKEN=""
 DAEMON_URL=""
 
@@ -61,9 +62,21 @@ while [ $# -gt 0 ]; do
             TENANT_TOKEN="$2"
             shift 2
             ;;
-        --resume)
+        --resume|-r)
+            # claude's -r/--resume takes an OPTIONAL session id. Forward the
+            # flag and, when the next token isn't another option, the id right
+            # after it so the two stay paired in the final exec. A bare
+            # --resume only opens the interactive picker, and a detached id
+            # leaks in as the initial prompt instead of resuming the session.
             RESUME=true
-            shift
+            CLAUDE_ARGS+=("--resume")
+            if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then
+                RESUME_ID="$2"
+                CLAUDE_ARGS+=("$2")
+                shift 2
+            else
+                shift
+            fi
             ;;
         --)
             shift
@@ -146,8 +159,7 @@ if [ -n "${MYCO_TOKEN:-}" ]; then
 fi
 
 if [ "$RESUME" = true ]; then
-    CLAUDE_ARGS=("--resume" "${CLAUDE_ARGS[@]}")
-    echo "[myco] resuming previous session"
+    echo "[myco] resuming previous session${RESUME_ID:+ ($RESUME_ID)}"
 fi
 
 cd "$PROJECT_DIR"
