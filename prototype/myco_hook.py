@@ -140,8 +140,18 @@ def last_assistant_text(transcript_path: str, wait_ms: int = 500) -> str:
         time.sleep(poll_interval_s)
 
 
-def parse_block(block_text: str) -> list:
-    events = []
+def parse_block_detailed(block_text: str) -> tuple:
+    """Parse a block into (events, skipped_lines).
+
+    Blank lines and `# comments` are dropped without comment — they're
+    deliberate. A line whose first token is not a protocol verb is also
+    dropped, but it is NOT deliberate, and that is what `skipped` carries.
+
+    The dangerous case is not a typo'd verb; it's a **wrapped detail**. A long
+    `direct` written across two lines loses everything after the break, and
+    today it loses it in silence — the author sees a dispatched event and
+    never learns that half the instruction never left."""
+    events, skipped = [], []
     for raw in block_text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -149,9 +159,32 @@ def parse_block(block_text: str) -> list:
         first = line.split(None, 1)[0].lower()
         if first not in VALID_VERBS:
             debug(f"skipping unknown verb in line: {line!r}")
+            skipped.append(line)
             continue
         events.append(line)
-    return events
+    return events, skipped
+
+
+def parse_block(block_text: str) -> list:
+    """Events only. See parse_block_detailed for what got dropped."""
+    return parse_block_detailed(block_text)[0]
+
+
+def format_skipped_lines_notice(skipped: list) -> str:
+    """Warn that lines inside the block never became events.
+
+    Names the first offending token, because the two causes need different
+    fixes: a typo'd verb is a one-word correction, a wrapped detail means the
+    line must be rejoined."""
+    n = len(skipped)
+    heads = ", ".join(repr(s.split(None, 1)[0]) for s in skipped[:3])
+    more = f" (+{n - 3})" if n > 3 else ""
+    quantas = "1 linha do bloco" if n == 1 else f"{n} linhas do bloco"
+    return (
+        f"⚠️ myco: {quantas} não virou evento — primeiro token não é verbo do "
+        f"protocolo: {heads}{more}. Verbo digitado errado, ou um detalhe que "
+        f"quebrou em duas linhas? Detalhe tem que caber numa linha só."
+    )
 
 
 def session_name(payload: dict) -> str:
@@ -238,6 +271,27 @@ def format_poke_notice(session: str, pokes: list) -> str:
     return "\n".join(lines)
 
 
+def format_extra_blocks_notice(dropped: int, dispatched: int) -> str:
+    """Warn the author that this turn wrote more than one <myco> block.
+
+    Only the LAST block is dispatched, and that is deliberate: a session that
+    quotes the protocol mid-answer (explaining it to the human, pasting an
+    example) must not fire real events. But dropping the earlier blocks in
+    SILENCE is the bug — a dispatch that never happened looks exactly like one
+    that did. Real case 2026-08-01: MAESTRO emitted `reply` and `direct` in two
+    blocks; only the `direct` landed, the restore order never reached RUNNER
+    and he asked three times.
+
+    The fix is the warning, not dispatching everything."""
+    anteriores = "bloco anterior foi descartado" if dropped == 1 else \
+                 f"{dropped} blocos anteriores foram descartados"
+    return (
+        f"⚠️ myco: {dropped + 1} blocos <myco> nesta resposta — despachei só o "
+        f"ÚLTIMO ({dispatched} evento(s)); o {anteriores}. "
+        f"Use UM bloco por resposta, com quantas linhas precisar."
+    )
+
+
 def main() -> int:
     payload = read_payload()
     debug(f"payload keys: {list(payload.keys())}")
@@ -259,10 +313,25 @@ def main() -> int:
         debug("no <myco> block in last turn")
         return 0
 
-    # Last block wins, so Claude can draft and revise within one turn.
-    events = parse_block(matches[-1])
+    # Last block wins, so Claude can draft and revise within one turn — and so
+    # that quoting the protocol mid-answer stays inert. Earlier blocks are
+    # still dropped; what changed (2026-08-09) is that the drop is announced.
+    events, skipped = parse_block_detailed(matches[-1])
+
+    notices = []
+    if len(matches) > 1:
+        notices.append(format_extra_blocks_notice(len(matches) - 1, len(events)))
+        debug(f"{len(matches)} blocks found; dispatched the last one only")
+    if skipped:
+        notices.append(format_skipped_lines_notice(skipped))
+
     if not events:
+        # Nothing to dispatch — but if lines were dropped, the author wrote a
+        # block believing it would go out. That is the loudest case, not the
+        # quietest: warn before returning.
         debug("<myco> block parsed to zero events")
+        if notices:
+            print(json.dumps({"systemMessage": "\n".join(notices)}))
         return 0
 
     session = session_name(payload)
@@ -274,12 +343,15 @@ def main() -> int:
         if not ok:
             debug(f"HTTP POST failed and MYCO_URL is set; {len(events)} event(s) dropped")
         elif response.get("pokes"):
-            # Surface the dispatch notice to the human (systemMessage is
-            # rendered by Claude Code in the session the human is reading).
-            notice = format_poke_notice(session, response["pokes"])
-            print(json.dumps({"systemMessage": notice}))
+            notices.append(format_poke_notice(session, response["pokes"]))
     else:
         append_events_fs(session, events)
+
+    # systemMessage is rendered by Claude Code in the session the human is
+    # reading — the author of the block is exactly who needs to hear that part
+    # of it was discarded.
+    if notices:
+        print(json.dumps({"systemMessage": "\n".join(notices)}))
     return 0
 
 

@@ -740,27 +740,52 @@ def _default_lod_k() -> int:
         return 3
 
 
+# How much free text a collapsed event keeps when it has NO kvs to fall back
+# on. Bounded so the panel stays roughly constant: worst case is one snippet
+# per collapsed event (~12 with the default K=3 over a 15-event window).
+COLLAPSED_SNIPPET_CHARS = 60
+
+
 def _render_event_line(ev, full: bool) -> str:
     """Render one event for the EVENTOS RELEVANTES block.
 
     full=True  → headline + full detail (free text + kvs), as authored.
-    full=False → headline + kvs only; the free-text prose is dropped so a
-                 long session's panel stays roughly constant in size. The
-                 kvs (ref/result/spec/addr/...) always survive — they're the
-                 auditable skeleton; only the ephemeral prose is shed.
+    full=False → headline + kvs; the free-text prose is shed so a long
+                 session's panel stays roughly constant in size. The kvs
+                 (ref/result/spec/addr/...) always survive — they're the
+                 auditable skeleton AND a pointer: `spec:msg/X.md` lets the
+                 reader recover the full content on demand.
+
+                 An event with NO kvs has no such pointer, so dropping its
+                 prose makes it unrecoverable from the panel — a `direct` or
+                 `reply` written as plain text collapses to `direct RUNNER`
+                 and the instruction is simply gone. For those, keep a
+                 bounded snippet: it is the pointer of last resort.
     """
     head = f"{ev['ts']} {ev['session']} {ev['verb']} {ev['obj']}".rstrip()
     if full:
         return f"{head} {ev['detail']}".rstrip() if ev["detail"] else head
     kvs = ev.get("kvs", {})
     if not kvs:
-        return head
+        detail = (ev.get("detail") or "").strip()
+        if not detail:
+            return head
+        if len(detail) > COLLAPSED_SNIPPET_CHARS:
+            detail = detail[:COLLAPSED_SNIPPET_CHARS].rstrip() + "…"
+        return f"{head} {detail}"
     kv_str = " ".join(f"{k}:{v}" for k, v in kvs.items())
     return f"{head} {kv_str}"
 
 
 def _age_label(ts_str: str) -> str:
-    """Human-readable age from an ISO timestamp."""
+    """Human-readable age from an ISO timestamp.
+
+    Granularity climbs with the interval. Past 24h the hours form stops being
+    readable exactly where legibility matters most: "last-seen 160.5h" is a
+    session abandoned for a week, and it reads like a large number rather than
+    like an alarm. `6d` cannot be misread. (Real case 2026-08-08: the panel
+    said 160.5h for five sessions and the abandonment was only caught by
+    querying /status by hand.)"""
     epoch = _parse_ts(ts_str)
     if epoch == 0.0:
         return "?"
@@ -769,7 +794,9 @@ def _age_label(ts_str: str) -> str:
         return f"{int(delta)}s"
     if delta < 3600:
         return f"{int(delta // 60)}min"
-    return f"{delta / 3600:.1f}h"
+    if delta < 86400:
+        return f"{delta / 3600:.1f}h"
+    return f"{int(delta // 86400)}d"
 
 
 def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,

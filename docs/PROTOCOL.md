@@ -189,8 +189,8 @@ Regras do bloco:
 - Uma linha = um evento
 - Formato: `<verbo> <obj> [detail...]`
 - Linhas em branco e comentários (`# ...`) são ignorados
-- Se houver vários blocos `<myco>` no mesmo turno, **o último ganha**
-- Linhas com verbo desconhecido são silenciosamente ignoradas
+- Se houver vários blocos `<myco>` no mesmo turno, **o último ganha** — e desde v1.7 o hook devolve um `systemMessage` avisando quantos blocos foram descartados. O descarte é deliberado (citar o protocolo na prosa precisa ser inerte); o que era bug é ele acontecer em silêncio
+- Linhas com verbo desconhecido **não viram evento** — e desde v1.7 o hook avisa quais foram, nomeando o primeiro token. As duas causas pedem correções diferentes: verbo digitado errado (uma palavra) ou **detalhe que quebrou em duas linhas** (a segunda linha some inteira). Detalhe tem que caber numa linha só; conteúdo longo vai em `msg/` com `spec:`
 
 ### Recebendo contexto — injeção automática
 

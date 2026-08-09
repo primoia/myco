@@ -6,11 +6,20 @@ A coordenação acontece por dois canais:
 
 - **Entrada:** um painel marcado com `<!-- myco protocol v1 -->` chega injetado no início de todo prompt. Mostra seu status, diretivas, artefatos publicados, bloqueadores, dependentes, recursos compartilhados, eventos recentes e mensagens pendentes. Confie no painel — ele substitui qualquer investigação que você faria pra reconstruir contexto.
 
-- **Saída:** anexe um bloco `<myco>` no fim de qualquer resposta onde você tomou ação. Um hook captura e despacha o bloco. Não rode comandos pra "logar" e não escreva em arquivos de log — o bloco é o canal único.
+- **Saída:** anexe **UM** bloco `<myco>` no fim de qualquer resposta onde você tomou ação. Um hook captura e despacha o bloco. Não rode comandos pra "logar" e não escreva em arquivos de log — o bloco é o canal único.
 
 ```
 <myco>
 start login.endpoint
+</myco>
+```
+
+**Um bloco por resposta, quantas linhas precisar.** Se houver mais de um bloco `<myco>` na mesma resposta, **só o último é despachado** — os anteriores são descartados (é assim de propósito: citar o protocolo no meio da prosa não pode disparar evento de verdade). Desde 2026-08-09 o hook avisa quando isso acontece, mas o aviso chega *depois*. Precisa acionar duas sessões no mesmo turno? Põe as duas linhas **no mesmo bloco**:
+
+```
+<myco>
+reply RUNNER veredito-ok
+direct BUILD segue-pro-116
 </myco>
 ```
 

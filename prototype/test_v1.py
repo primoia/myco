@@ -3688,6 +3688,254 @@ class TestPokeHints:
         assert "cutuque DEV" in notice
 
 
+def _ts_ago(seconds: float) -> str:
+    """ISO timestamp `seconds` in the past, in the local-time format the
+    daemon parses (`_parse_ts` uses time.strptime + time.mktime)."""
+    import time as _t
+    return _t.strftime("%Y-%m-%dT%H:%M:%S", _t.localtime(_t.time() - seconds))
+
+
+class TestAgeLabelGranularity:
+    """Age labels must stay legible as the interval grows. Past 24h the hours
+    form reads like a big number instead of like an alarm: a session abandoned
+    for a week showed as `last-seen 160.5h` and nobody registered it."""
+
+    def test_seconds(self):
+        from mycod import _age_label
+        assert _age_label(_ts_ago(5)).endswith("s")
+
+    def test_minutes(self):
+        from mycod import _age_label
+        assert _age_label(_ts_ago(300)) == "5min"
+
+    def test_hours_keep_one_decimal_under_a_day(self):
+        from mycod import _age_label
+        assert _age_label(_ts_ago(3600 * 5)) == "5.0h"
+
+    def test_just_under_24h_is_still_hours(self):
+        from mycod import _age_label
+        label = _age_label(_ts_ago(3600 * 23.5))
+        assert label.endswith("h") and not label.endswith("d")
+
+    def test_just_over_24h_becomes_days(self):
+        from mycod import _age_label
+        assert _age_label(_ts_ago(3600 * 25)) == "1d"
+
+    def test_the_case_that_was_missed(self):
+        """160.5h — the real panel value for five abandoned sessions."""
+        from mycod import _age_label
+        assert _age_label(_ts_ago(3600 * 160.5)) == "6d"
+
+    def test_unparsable_timestamp_still_returns_placeholder(self):
+        from mycod import _age_label
+        assert _age_label("not-a-timestamp") == "?"
+
+    def test_peers_section_uses_the_day_form(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("DEV", f"{_ts_ago(3600 * 160)} DEV done x ref:r"))
+        idx.sessions_known.add("AUTH")
+        view = render_view(idx, "AUTH")
+        assert "last-seen 6d" in view
+        assert "160" not in view.split("## PEERS")[1].split("##")[0]
+
+
+class TestCollapsedEventKeepsSnippetWithoutKvs:
+    """LOD compression drops prose but keeps kvs, because kvs are both the
+    auditable skeleton and a pointer (`spec:msg/X.md` recovers the rest).
+    An event with NO kvs has no pointer — dropping its prose makes it
+    unrecoverable, which is how a `direct` collapses to `direct RUNNER` and
+    the instruction simply disappears from the panel."""
+
+    def _idx_with_old_plain_event(self, detail):
+        idx = SwarmIndex()
+        idx.apply(parse_event("MAESTRO", f"T0 MAESTRO direct RUNNER {detail}"))
+        for i in range(1, 6):
+            idx.apply(parse_event("MAESTRO", f"T{i} MAESTRO start uc-{i:03d}"))
+        return idx
+
+    def test_long_plain_detail_keeps_a_bounded_head(self):
+        from mycod import COLLAPSED_SNIPPET_CHARS
+        detail = "APURA o cloudflared do .ai entre 21h e 22h UTC e traz o vigia pro repo"
+        view = render_view(self._idx_with_old_plain_event(detail), "MAESTRO", lod_k=2)
+        assert "direct RUNNER APURA o cloudflared" in view
+        assert "…" in view
+        assert "traz o vigia pro repo" not in view
+        collapsed = [ln for ln in view.splitlines()
+                     if "direct RUNNER" in ln and ln.startswith("T0")][0]
+        assert len(collapsed) < len(f"T0 MAESTRO direct RUNNER {detail}")
+        assert COLLAPSED_SNIPPET_CHARS == 60
+
+    def test_short_plain_detail_survives_whole_without_ellipsis(self):
+        view = render_view(self._idx_with_old_plain_event("apura o tunel"), "MAESTRO", lod_k=2)
+        assert "direct RUNNER apura o tunel" in view
+        assert "apura o tunel…" not in view
+
+    def test_event_without_detail_is_unchanged(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("MAESTRO", "T0 MAESTRO start uc-000"))
+        for i in range(1, 6):
+            idx.apply(parse_event("MAESTRO", f"T{i} MAESTRO start uc-{i:03d}"))
+        view = render_view(idx, "MAESTRO", lod_k=2)
+        assert "T0 MAESTRO start uc-000" in view
+
+    def test_events_with_kvs_still_shed_all_prose(self):
+        """Regression: the snippet is the fallback for events that have no
+        pointer. Events that DO carry kvs keep collapsing as before."""
+        idx = SwarmIndex()
+        idx.apply(parse_event(
+            "AUTH", "T0 AUTH done uc-000 prosa-longa-que-deve-sumir ref:r0 result:ok"))
+        for i in range(1, 6):
+            idx.apply(parse_event("AUTH", f"T{i} AUTH start uc-{i:03d}"))
+        view = render_view(idx, "AUTH", lod_k=2)
+        assert "prosa-longa-que-deve-sumir" not in view
+        assert "ref:r0" in view and "result:ok" in view
+
+
+class _HookRunner:
+    """Shared fixture plumbing for the Stop-hook tests. Not collected by
+    pytest (no Test prefix), so inheriting it doesn't re-run anything."""
+
+    def _transcript(self, tmp_path, assistant_text):
+        import json as _json
+        p = tmp_path / "transcript.jsonl"
+        p.write_text(
+            _json.dumps({"type": "user", "message": {"content": "vai"}}) + "\n" +
+            _json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": assistant_text}]}}) + "\n"
+        )
+        return p
+
+    def _run_hook(self, tmp_path, assistant_text, monkeypatch, capsys):
+        import io
+        import json as _json
+        import myco_hook
+        tp = self._transcript(tmp_path, assistant_text)
+        monkeypatch.delenv("MYCO_URL", raising=False)
+        monkeypatch.setenv("MYCO_SWARM", str(tmp_path / "swarm"))
+        monkeypatch.setenv("MYCO_SESSION", "MAESTRO")
+        monkeypatch.setattr(
+            "sys.stdin",
+            io.StringIO(_json.dumps({"transcript_path": str(tp)})),
+        )
+        assert myco_hook.main() == 0
+        out = capsys.readouterr().out
+        log = tmp_path / "swarm" / "log" / "MAESTRO.log"
+        return out, (log.read_text() if log.exists() else "")
+
+
+class TestHookWarnsOnExtraBlocks(_HookRunner):
+    """Only the last <myco> block is dispatched — deliberately, so that
+    quoting the protocol mid-answer stays inert. What was a bug is that the
+    earlier blocks vanished in SILENCE: on 2026-08-01 a `reply` and a `direct`
+    went out in two blocks, only the `direct` landed, and the restore order
+    never reached its target."""
+
+    def test_single_block_dispatches_silently(self, tmp_path, monkeypatch, capsys):
+        out, log = self._run_hook(
+            tmp_path, "texto\n<myco>\nstart uc-001\n</myco>", monkeypatch, capsys)
+        assert out.strip() == ""
+        assert "start uc-001" in log
+
+    def test_two_blocks_warn_and_name_what_was_lost(self, tmp_path, monkeypatch, capsys):
+        import json as _json
+        text = ("<myco>\nreply RUNNER restaura-os-audit-logs\n</myco>\n"
+                "mais texto\n"
+                "<myco>\ndirect BUILD outra-coisa\n</myco>")
+        out, log = self._run_hook(tmp_path, text, monkeypatch, capsys)
+        notice = _json.loads(out)["systemMessage"]
+        assert "2 blocos" in notice
+        assert "ÚLTIMO" in notice
+        assert "descartado" in notice
+        # and the drop itself is unchanged: only the last block landed
+        assert "direct BUILD outra-coisa" in log
+        assert "reply RUNNER" not in log
+
+    def test_three_blocks_report_the_right_count(self, tmp_path, monkeypatch, capsys):
+        import json as _json
+        text = "<myco>\nstart a\n</myco>\n<myco>\nstart b\n</myco>\n<myco>\nstart c\n</myco>"
+        out, log = self._run_hook(tmp_path, text, monkeypatch, capsys)
+        notice = _json.loads(out)["systemMessage"]
+        assert "3 blocos" in notice
+        assert "2 blocos anteriores foram descartados" in notice
+        assert "start c" in log and "start a" not in log
+
+    def test_multiple_verbs_in_one_block_do_not_warn(self, tmp_path, monkeypatch, capsys):
+        """The supported way to dispatch two things in one turn."""
+        text = "<myco>\nreply RUNNER ok\ndirect BUILD vai\n</myco>"
+        out, log = self._run_hook(tmp_path, text, monkeypatch, capsys)
+        assert out.strip() == ""
+        assert "reply RUNNER ok" in log and "direct BUILD vai" in log
+
+    def test_notice_wording(self):
+        import myco_hook
+        assert "1 evento(s)" in myco_hook.format_extra_blocks_notice(1, 1)
+        assert "bloco anterior foi descartado" in myco_hook.format_extra_blocks_notice(1, 1)
+        assert "2 blocos anteriores foram descartados" in \
+            myco_hook.format_extra_blocks_notice(2, 3)
+
+
+class TestHookWarnsOnSkippedLines(_HookRunner):
+    """A line inside the block whose first token isn't a protocol verb is
+    dropped. Blank lines and `# comments` are dropped on purpose; this is not.
+    The dangerous case is a WRAPPED DETAIL: a long `direct` broken across two
+    lines loses everything after the break, and used to lose it in silence."""
+
+    def test_typo_in_verb_is_reported(self, tmp_path, monkeypatch, capsys):
+        import json as _json
+        out, log = self._run_hook(
+            tmp_path, "<myco>\nstart uc-001\nrepy RUNNER veredito\n</myco>",
+            monkeypatch, capsys)
+        notice = _json.loads(out)["systemMessage"]
+        assert "1 linha do bloco" in notice
+        assert "'repy'" in notice
+        assert "start uc-001" in log
+        assert "repy" not in log
+
+    def test_wrapped_detail_is_reported(self, tmp_path, monkeypatch, capsys):
+        """The case that motivated this: the tail of a long directive."""
+        import json as _json
+        text = ("<myco>\ndirect RUNNER apura o cloudflared do .ai entre 21h e 22h\n"
+                "e depois traz o vigia pro repo\n</myco>")
+        out, log = self._run_hook(tmp_path, text, monkeypatch, capsys)
+        notice = _json.loads(out)["systemMessage"]
+        assert "quebrou em duas linhas" in notice
+        assert "'e'" in notice
+        assert "traz o vigia pro repo" not in log
+
+    def test_block_with_only_bad_lines_still_warns(self, tmp_path, monkeypatch, capsys):
+        """Zero events dispatched is the LOUDEST case, not the quietest: the
+        author wrote a block believing it would go out."""
+        import json as _json
+        out, log = self._run_hook(
+            tmp_path, "<myco>\nrepy RUNNER veredito\n</myco>", monkeypatch, capsys)
+        notice = _json.loads(out)["systemMessage"]
+        assert "1 linha do bloco" in notice
+        assert log == ""
+
+    def test_comments_and_blank_lines_never_warn(self, tmp_path, monkeypatch, capsys):
+        out, log = self._run_hook(
+            tmp_path, "<myco>\n# um comentario\n\nstart uc-001\n\n</myco>",
+            monkeypatch, capsys)
+        assert out.strip() == ""
+        assert "start uc-001" in log
+
+    def test_notice_names_up_to_three_tokens_then_counts(self):
+        import myco_hook
+        notice = myco_hook.format_skipped_lines_notice(
+            ["aaa x", "bbb y", "ccc z", "ddd w", "eee v"])
+        assert "5 linhas do bloco" in notice
+        assert "'aaa'" in notice and "'ccc'" in notice
+        assert "(+2)" in notice
+        assert "'ddd'" not in notice
+
+    def test_parse_block_still_returns_only_events(self):
+        """Back-compat: the old one-return-value signature still works."""
+        import myco_hook
+        assert myco_hook.parse_block("start a\nlixo b\ndone c") == ["start a", "done c"]
+        events, skipped = myco_hook.parse_block_detailed("start a\nlixo b")
+        assert events == ["start a"] and skipped == ["lixo b"]
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
