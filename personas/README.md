@@ -17,9 +17,10 @@ Para a sessão `$SESSION`, o primeiro que existir vence:
    (especializada; pode ser um documento completo ou só o delta do domínio)
 2. `~/myco/personas/$SESSION.md` — persona base (este diretório)
 
-O resolvido é copiado para `$PROJECT_DIR/PERSONA.md` e carregado via import
-`@PERSONA.md` no CLAUDE.md do myco. Sessão sem persona em nenhuma camada
-roda sem `PERSONA.md` — o import ausente é ignorado.
+A resolvida é injetada **por processo** via `--append-system-prompt-file`
+no `claude` da sessão — nada de arquivo de persona compartilhado em disco,
+então várias sessões (MAESTRO, RUNNER, BUILD...) na MESMA pasta não colidem.
+Sessão sem persona em nenhuma camada roda sem a flag.
 
 ## Papéis base
 

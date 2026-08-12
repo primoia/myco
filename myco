@@ -101,11 +101,12 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
 
 # --- Resolve persona da sessão (projeto vence; myco é fallback) ---
-# O CLAUDE.md do myco importa @PERSONA.md; import ausente é ignorado.
-rm -f "$PROJECT_DIR/PERSONA.md"
+# Injetada por PROCESSO via --append-system-prompt-file: várias sessões na
+# mesma pasta não colidem (nenhum arquivo de persona compartilhado em disco).
+rm -f "$PROJECT_DIR/PERSONA.md"  # limpa resquício do esquema antigo
 for persona in "$PROJECT_DIR/docs/personas/$SESSION.md" "$MYCO_DIR/personas/$SESSION.md"; do
     if [ -f "$persona" ]; then
-        cp "$persona" "$PROJECT_DIR/PERSONA.md"
+        CLAUDE_ARGS+=("--append-system-prompt-file" "$persona")
         echo "[myco] persona=$SESSION ← $persona"
         break
     fi

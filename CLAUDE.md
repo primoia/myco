@@ -142,8 +142,5 @@ Read peers/AUTH/index.js
 6. Bloqueado sem saber pra quem perguntar? `ask DIRECTOR <pergunta>`.
 7. Foco no que o humano pediu — o swarm é coordenação, não trabalho extra.
 
-# Persona da sessão
-@PERSONA.md
-
 # Contexto do projeto
 @AGENTS.md
