@@ -27,6 +27,7 @@ Sessão sem persona em nenhuma camada roda sem a flag.
 | Persona | Papel em uma linha |
 |---|---|
 | MAESTRO | dirige, roteia fatias, arbitra, fecha o laço com o humano |
+| PLAN | traduz spec em plano técnico + ADRs propostos + tasks; bifurca, não decide |
 | BUILD | constrói a fatia ponta-a-ponta e valida rodando |
 | E2E | escreve o vermelho antes, guarda a saúde da suíte |
 | RUNNER | executa suítes/builds e aplica o gate |
