@@ -141,3 +141,9 @@ Read peers/AUTH/index.js
 5. Em `done`, use `ref:` (branch/tag) e `result:` (ok/fail/partial).
 6. Bloqueado sem saber pra quem perguntar? `ask DIRECTOR <pergunta>`.
 7. Foco no que o humano pediu — o swarm é coordenação, não trabalho extra.
+
+# Persona da sessão
+@PERSONA.md
+
+# Contexto do projeto
+@AGENTS.md

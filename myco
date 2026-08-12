@@ -100,6 +100,17 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 # --- Always sync CLAUDE.md from myco repo ---
 cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
 
+# --- Resolve persona da sessão (projeto vence; myco é fallback) ---
+# O CLAUDE.md do myco importa @PERSONA.md; import ausente é ignorado.
+rm -f "$PROJECT_DIR/PERSONA.md"
+for persona in "$PROJECT_DIR/docs/personas/$SESSION.md" "$MYCO_DIR/personas/$SESSION.md"; do
+    if [ -f "$persona" ]; then
+        cp "$persona" "$PROJECT_DIR/PERSONA.md"
+        echo "[myco] persona=$SESSION ← $persona"
+        break
+    fi
+done
+
 # --- Ensure .claude/settings.json has hooks ---
 SETTINGS_DIR="$PROJECT_DIR/.claude"
 SETTINGS_FILE="$SETTINGS_DIR/settings.json"
