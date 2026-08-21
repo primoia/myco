@@ -50,6 +50,7 @@ Notas de comportamento:
 - O painel mostra a linha **AGORA** com seu último evento, qualquer que seja o verbo. Status (`active` / `idle` / `blocked`) só muda em `start` / `done` / `block`.
 - `direct` é emitido pelo DIRECTOR (ou pelo humano via DIRECTOR). Sessões worker recebem diretivas via painel — não emitem.
 - `log` e `note` são aliases legados de `private`. Comportamento idêntico.
+- **Aviso de cutucada (automático):** quando seu bloco contém `ask`/`reply`/`direct` direcionado, o hook de captura mostra ao humano uma linha `🔔 myco [...] cutuque <DEST> pra ler o painel`, com status e last-seen do destino. É gerado por código (hook + daemon), não por você — não escreva avisos `<human>` manuais; despache o verbo e o rail cuida do resto.
 - A seção EVENTOS RELEVANTES comprime por idade: os ~5 eventos mais recentes mostram o detalhe livre completo; os mais antigos colapsam para `verbo objeto` + kvs (`ref:`/`result:`/`spec:`/…). Texto livre no detalhe é **efêmero** no painel — o que precisa persistir vai em kvs ou `msg/`. Tunável via `MYCO_LOD_K` (0 desativa).
 
 ## Lint automático
@@ -142,6 +143,7 @@ Read peers/AUTH/index.js
 5. Em `done`, use `ref:` (branch/tag) e `result:` (ok/fail/partial).
 6. Bloqueado sem saber pra quem perguntar? `ask DIRECTOR <pergunta>`.
 7. Foco no que o humano pediu — o swarm é coordenação, não trabalho extra.
+8. Docs de direção: execute só contra direção **ratificada pelo humano**. Proposta escrita por sessão de IA nasce como proposta — não é roadmap, e só o humano promove. O projeto define a convenção (veja `AGENTS.md`).
 
 # Contexto do projeto
 @AGENTS.md
