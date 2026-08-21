@@ -865,7 +865,7 @@ def _directive_obj(detail_text: str) -> str:
     `done … re:<obj>` must quote to close it. Empty text → no object (such a
     directive can only be closed via its spec:)."""
     parts = (detail_text or "").split()
-    return parts[0] if parts else ""
+    return parts[0].rstrip(",.:;—-") if parts else ""
 
 
 def _render_event_line(ev, full: bool) -> str:

@@ -80,7 +80,18 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 | `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.1.100:7777` |
 | `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
-| `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
+| `re:` | pergunta sendo respondida; em `done`/`reply`, diretiva sendo fechada | `re:msg/FRONT-010.md` / `re:faz-isso` |
+
+### Diretiva tem estado (v1.7)
+
+Um `direct` fica **aberto** — e aparece inteiro no painel, em toda mensagem — até o destinatário fechá-lo:
+
+```
+done <objeto> re:<objeto-da-diretiva>          # cumpriu
+reply <autor> <resposta> re:<objeto-da-diretiva>   # a diretiva era uma pergunta
+```
+
+O objeto da diretiva é a **primeira palavra do texto dela** (ou o `spec:` dela). Fechada, vira uma linha `✓` — prova de que foi cumprida, sem custar ~1KB por mensagem. Diretiva para `ALL` fecha por sessão. O lint avisa `done` sem `re:` com diretiva aberta, e `re:` que não casa com nada.
 
 ## Comunicação rica via msg/
 

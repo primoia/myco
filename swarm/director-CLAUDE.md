@@ -58,6 +58,20 @@ direct FRONT atualize-protocolo re:msg/FRONT-010.md spec:msg/DIRECTOR-004.md
 | `ask <sessão> <pergunta>` | pergunta dirigida a uma sessão |
 | `log <observação>` | observação interna (invisível para outros) |
 
+
+### Diretiva tem estado (v1.7) — o que você emite fica aberto até o alvo fechar
+
+Um `direct` fica **aberto** — e aparece inteiro no painel, em toda mensagem — até o destinatário fechá-lo:
+
+```
+done <objeto> re:<objeto-da-diretiva>          # cumpriu
+reply <autor> <resposta> re:<objeto-da-diretiva>   # a diretiva era uma pergunta
+```
+
+Escreva o objeto como primeira palavra (≤6 palavras hifenizadas; detalhe em `spec:msg/`). O objeto é a **primeira palavra do texto** (ou o `spec:` dela). Fechada, vira uma linha `✓` — prova de que foi cumprida, sem custar ~1KB por mensagem. Diretiva para `ALL` fecha por sessão. O lint avisa `done` sem `re:` com diretiva aberta, e `re:` que não casa com nada.
+
+Você pode retirar uma diretiva sua (cumprida sem `re:`, ou obsoleta) com `private <nota> re:<objeto>` — invisível aos peers; para `ALL`, fecha para todos.
+
 ## Comunicação rica via msg/
 
 Para instruções longas, crie um arquivo em `$MYCO_SWARM/msg/`:

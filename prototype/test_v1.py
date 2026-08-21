@@ -4077,3 +4077,10 @@ class TestDirectiveState:
         idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho texto"))
         idx.apply(parse_event("AUTH", "T1 AUTH private x re:foque-no-carrinho"))
         assert len(idx.open_directives_for("CART")) == 1
+
+    def test_directive_obj_strips_trailing_punctuation(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART RE-GATE, agora mesmo"))
+        assert idx.directive_meta[("T0", "CART")]["obj"] == "RE-GATE"
+        idx.apply(parse_event("CART", "T1 CART done x re:RE-GATE"))
+        assert idx.open_directives_for("CART") == []
