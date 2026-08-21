@@ -265,6 +265,14 @@ class SwarmIndex:
         self.provides = defaultdict(set)
         self.resources = {}
         self.directives = []
+        # v1.7: directive STATE. A `direct` stays OPEN until its target closes
+        # it with `done … re:<obj>` (or `reply <author> … re:<obj>`); an
+        # ALL-directive closes per session. Keyed by (ts, target) → author,
+        # the object a `re:` must quote (first token of the free text, or its
+        # spec:), and {closer: closed_ts}. Open directives render in full —
+        # peers re-read the prose while the work is pending — closed ones
+        # collapse to one ✓ line (E2E-156, poll of 2026-08-21).
+        self.directive_meta = {}
         self.questions = []
         self.events = deque(maxlen=2000)
         self.sessions_known = set()
@@ -326,6 +334,10 @@ class SwarmIndex:
                 "spec": kvs.get("spec", ""),
                 "result": kvs.get("result", ""),
             })
+            # v1.7: `done … re:<obj>` closes the directive this done fulfils.
+            re_id = kvs.get("re")
+            if re_id:
+                self._close_directive(re_id, s, ev["ts"])
         elif verb == "need":
             self.needs[s].add(obj)
         elif verb == "block":
@@ -344,6 +356,12 @@ class SwarmIndex:
             self.resources[full_obj] = {"state": "DOWN", "addr": prev_addr}
         elif verb == "direct":
             self.directives.append((ev["ts"], obj, detail))
+            self.directive_meta[(ev["ts"], obj)] = {
+                "author": s,
+                "obj": _directive_obj(detail_text),
+                "spec": kvs.get("spec", ""),
+                "closed": {},
+            }
             # v1.3: re: on direct resolves a specific question
             re_id = kvs.get("re")
             if re_id:
@@ -382,6 +400,11 @@ class SwarmIndex:
                 resolved = self._resolve_question_by_spec(re_id, s)
             if not resolved:
                 self._resolve_questions_between(obj, s)
+            # v1.7: a directive that asks something is answered by `reply
+            # <author> … re:<obj>` — that closes it too (DOCKERGIT, 2026-08-21:
+            # "diretiva que pergunta não fecha por reply").
+            if re_id:
+                self._close_directive(re_id, s, ev["ts"], author=obj)
             if self.session_status.get(s) in (None, "unknown"):
                 self.session_status[s] = "active"
             self.session_action[s] = f"reply {obj}"
@@ -392,6 +415,13 @@ class SwarmIndex:
                 self.session_status[s] = "active"
             self.session_action[s] = f"say {obj}"
         elif verb in ("note", "log", "private"):
+            # v1.7: the AUTHOR of a directive may retire it with
+            # `private … re:<obj>` (bookkeeping, invisible to peers): the
+            # work got done without a `re:`, or the directive is obsolete.
+            # Closes it for its target — for ALL, for everyone ("*").
+            re_id = kvs.get("re")
+            if re_id:
+                self._close_directive_as_author(re_id, s, ev["ts"])
             # v1: track ack for messages and resolve associated questions
             # v1.6 (Win 1): "private" is the canonical name; "log" and "note"
             # remain accepted aliases. The verb is intentionally invisible to
@@ -405,6 +435,56 @@ class SwarmIndex:
             # AGORA reflects the latest event regardless of verb (Win 3).
             # Display label uses the canonical name even for legacy aliases.
             self.session_action[s] = f"private {obj}" if obj else "private"
+
+    def open_directives_for(self, session: str) -> list:
+        """Directives addressed to `session` (or ALL) it hasn't closed yet.
+        Returns (ts, target, detail, meta) tuples, oldest first."""
+        out = []
+        for ts, target, detail in self.directives:
+            if target not in ("ALL", session):
+                continue
+            meta = self.directive_meta.get((ts, target))
+            if meta and _closed_for(meta, session):
+                continue
+            out.append((ts, target, detail, meta))
+        return out
+
+    def _close_directive_as_author(self, re_id: str, author: str,
+                                   closed_ts: str) -> bool:
+        """Author retires the NEWEST open directive of theirs whose
+        object/spec matches; an ALL-directive closes for everyone."""
+        for d_ts, target, _detail in reversed(self.directives):
+            meta = self.directive_meta.get((d_ts, target))
+            if not meta or meta["author"] != author:
+                continue
+            if re_id not in (meta["obj"], meta["spec"]) or not re_id:
+                continue
+            key = "*" if target == "ALL" else target
+            if key in meta["closed"]:
+                continue
+            meta["closed"][key] = closed_ts
+            return True
+        return False
+
+    def _close_directive(self, re_id: str, closer: str, closed_ts: str,
+                         author: str = None) -> bool:
+        """`re:<obj>` (or `re:<spec>`) from `closer` closes the NEWEST open
+        directive addressed to it whose object/spec matches. Only the target
+        can close (anyone, for ALL); a stranger's `re:` is ignored. With
+        `author` set (reply path) the directive must also come from them."""
+        for d_ts, target, _detail in reversed(self.directives):
+            if target not in ("ALL", closer):
+                continue
+            meta = self.directive_meta.get((d_ts, target))
+            if not meta or _closed_for(meta, closer):
+                continue
+            if author and meta["author"] != author:
+                continue
+            if re_id not in (meta["obj"], meta["spec"]) or not re_id:
+                continue
+            meta["closed"][closer] = closed_ts
+            return True
+        return False
 
     def _resolve_questions_between(self, asker: str, replier: str):
         """Mark all open questions from asker→replier as resolved.
@@ -492,6 +572,34 @@ class SwarmIndex:
                     f"({summary}). Reply or acknowledge before closing "
                     f"the turn."
                 )
+
+        # e. v1.7: directive state. `done` without `re:` while directive(s)
+        # addressed to the sender are open → they keep rendering in full in
+        # every panel until someone closes them (ALL-directives excluded from
+        # the nag: they're polls/notices). `done re:<x>` matching no open
+        # directive → the close is silently lost, say so.
+        if verb == "done":
+            re_id = ev.get("kvs", {}).get("re")
+            open_mine = [m for _, _, _, m in self.open_directives_for(s) if m]
+            if re_id:
+                if not any(re_id in (m["obj"], m["spec"]) for m in open_mine):
+                    objs = ", ".join(m["obj"] for m in open_mine) or "none"
+                    warnings.append(
+                        f"done re:{re_id}: matches no open directive for you "
+                        f"(open: {objs}). The directive stays open."
+                    )
+            else:
+                targeted = [
+                    m["obj"] for _, t, _, m in self.open_directives_for(s)
+                    if m and t == s
+                ]
+                if targeted:
+                    shown = ", ".join(targeted[:3])
+                    warnings.append(
+                        f"done without re: while {len(targeted)} directive(s) "
+                        f"for you are open ({shown}). Add re:<obj> to close "
+                        f"the one this done fulfils."
+                    )
 
         # c. spec: pointer to a msg that doesn't exist → dangling reference
         spec_id = ev.get("kvs", {}).get("spec")
@@ -746,6 +854,20 @@ def _default_lod_k() -> int:
 COLLAPSED_SNIPPET_CHARS = 60
 
 
+def _closed_for(meta: dict, session: str) -> bool:
+    """Closed for `session` if it closed it itself, or the author retired
+    it ("*" = closed for everyone; a targeted one is keyed by its target)."""
+    return session in meta["closed"] or "*" in meta["closed"]
+
+
+def _directive_obj(detail_text: str) -> str:
+    """The object of a directive = first token of its free text — what a
+    `done … re:<obj>` must quote to close it. Empty text → no object (such a
+    directive can only be closed via its spec:)."""
+    parts = (detail_text or "").split()
+    return parts[0] if parts else ""
+
+
 def _render_event_line(ev, full: bool) -> str:
     """Render one event for the EVENTOS RELEVANTES block.
 
@@ -877,15 +999,29 @@ def render_view(index: SwarmIndex, session: str, swarm_dir: Path = None,
     # Directive target "ALL" is the broadcast marker (uppercased by
     # parse_event like any session name); session-specific targets match
     # uppercased session ids.
-    relevant_directives = [
-        (ts, t, txt) for ts, t, txt in directives
-        if t in ("ALL", session)
-    ]
-    if relevant_directives:
-        for ts, target, text in relevant_directives[-5:]:
+    # v1.7: OPEN directives keep their full text (the peers re-read the prose
+    # while the work is pending — BUILD, SEC and RUNNER each had a case where
+    # compressing it would have cost work). CLOSED ones collapse to one ✓
+    # line: still visible as proof, no longer ~1KB per message; only the
+    # newest few survive so the list doesn't grow forever.
+    open_d, closed_d = [], []
+    for ts, t, txt in directives:
+        if t not in ("ALL", session):
+            continue
+        meta = index.directive_meta.get((ts, t))
+        if meta and _closed_for(meta, session):
+            closed_d.append((ts, meta["obj"] or txt))
+        else:
+            open_d.append((ts, txt))
+    if open_d:
+        for ts, text in open_d[-5:]:
             lines.append(f"- [{ts}] {text}")
+    elif closed_d:
+        lines.append("Nenhuma diretiva aberta.")
     else:
         lines.append("Nenhuma diretiva ativa.")
+    for ts, obj in closed_d[-3:]:
+        lines.append(f"- ✓ [{ts}] {obj}")
     lines.append("")
 
     # v1.3: ARTEFATOS PUBLICADOS — dedupe by (session, obj), show latest only

@@ -3939,3 +3939,141 @@ class TestHookWarnsOnSkippedLines(_HookRunner):
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------- v1.7: directive state (E2E-156) ----------
+
+class TestDirectiveState:
+    """A `direct` is OPEN until its target closes it with `done … re:<obj>`
+    (or `reply <author> … re:<obj>`). Open → full text in the panel; closed →
+    one ✓ line. ALL-directives close per session; strangers can't close."""
+
+    def _idx(self):
+        idx = SwarmIndex()
+        for s in ("DIR", "CART", "AUTH"):
+            idx.sessions_known.add(s)
+        return idx
+
+    def _diretivas(self, idx, session):
+        view = render_view(idx, session)
+        return view.split("## DIRETIVAS")[1].split("## ")[0]
+
+    def test_open_directive_keeps_full_text(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho — detalhe longo da instrucao"))
+        sec = self._diretivas(idx, "CART")
+        assert "detalhe longo da instrucao" in sec
+        assert "✓" not in sec
+
+    def test_done_re_closes_and_collapses(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho — detalhe longo da instrucao"))
+        idx.apply(parse_event("CART", "T1 CART done carrinho-pronto re:foque-no-carrinho result:ok"))
+        sec = self._diretivas(idx, "CART")
+        assert "✓ [T0] foque-no-carrinho" in sec
+        assert "detalhe longo" not in sec
+        assert "Nenhuma diretiva aberta." in sec
+        assert idx.open_directives_for("CART") == []
+
+    def test_done_re_spec_closes_too(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART faz-isso spec:msg/DIR-001.md"))
+        idx.apply(parse_event("CART", "T1 CART done feito re:msg/DIR-001.md"))
+        assert idx.open_directives_for("CART") == []
+
+    def test_stranger_cannot_close(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho"))
+        idx.apply(parse_event("AUTH", "T1 AUTH done algo re:foque-no-carrinho"))
+        assert len(idx.open_directives_for("CART")) == 1
+
+    def test_all_directive_closes_per_session(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct all pesquisa-de-uma-linha responde em uma linha"))
+        idx.apply(parse_event("CART", "T1 CART reply DIR adoto re:pesquisa-de-uma-linha"))
+        assert "✓ [T0] pesquisa-de-uma-linha" in self._diretivas(idx, "CART")
+        assert "responde em uma linha" in self._diretivas(idx, "AUTH")
+
+    def test_reply_closes_only_if_author_matches(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART faz-isso agora"))
+        idx.apply(parse_event("CART", "T1 CART reply AUTH tanto-faz re:faz-isso"))
+        assert len(idx.open_directives_for("CART")) == 1
+        idx.apply(parse_event("CART", "T2 CART reply DIR feito re:faz-isso"))
+        assert idx.open_directives_for("CART") == []
+
+    def test_newest_matching_directive_closes_first(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART faz-isso v1"))
+        idx.apply(parse_event("DIR", "T1 DIR direct CART faz-isso v2"))
+        idx.apply(parse_event("CART", "T2 CART done x re:faz-isso"))
+        left = idx.open_directives_for("CART")
+        assert [d[0] for d in left] == ["T0"]
+
+    def test_closed_capped_at_three_open_at_five(self):
+        idx = self._idx()
+        for i in range(5):
+            idx.apply(parse_event("DIR", f"T{i} DIR direct CART velha-{i} texto"))
+            idx.apply(parse_event("CART", f"T{i}c CART done x re:velha-{i}"))
+        for i in range(7):
+            idx.apply(parse_event("DIR", f"U{i} DIR direct CART aberta-{i} texto"))
+        sec = self._diretivas(idx, "CART")
+        assert sec.count("✓") == 3
+        assert "velha-4" in sec and "velha-1" not in sec
+        assert "aberta-6" in sec and "aberta-1" not in sec
+
+    def test_no_directives_message_unchanged(self):
+        idx = self._idx()
+        assert "Nenhuma diretiva ativa." in self._diretivas(idx, "CART")
+
+    # lint (runs BEFORE apply, so the directive is still open at check time)
+
+    def test_lint_done_without_re_warns_on_targeted(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho"))
+        w = idx.lint_event(parse_event("CART", "T1 CART done carrinho-pronto"))
+        assert any("done without re:" in x and "foque-no-carrinho" in x for x in w)
+
+    def test_lint_done_without_re_silent_on_all(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct all aviso-geral"))
+        w = idx.lint_event(parse_event("CART", "T1 CART done algo"))
+        assert not any("done without re:" in x for x in w)
+
+    def test_lint_done_re_nomatch_warns(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho"))
+        w = idx.lint_event(parse_event("CART", "T1 CART done x re:outro-nome"))
+        assert any("matches no open directive" in x and "foque-no-carrinho" in x for x in w)
+
+    def test_lint_done_re_match_is_silent(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho"))
+        w = idx.lint_event(parse_event("CART", "T1 CART done x re:foque-no-carrinho"))
+        assert not any("directive" in x for x in w)
+
+    def test_lint_done_silent_when_nothing_open(self):
+        idx = self._idx()
+        w = idx.lint_event(parse_event("CART", "T1 CART done x"))
+        assert not any("directive" in x for x in w)
+
+    # author retires its own directive (backlog / obsolete) — invisible bookkeeping
+
+    def test_author_private_re_closes_targeted(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho texto"))
+        idx.apply(parse_event("DIR", "T1 DIR private retiro re:foque-no-carrinho"))
+        assert idx.open_directives_for("CART") == []
+        assert "✓ [T0] foque-no-carrinho" in self._diretivas(idx, "CART")
+
+    def test_author_private_re_closes_all_for_everyone(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct all pesquisa-x texto"))
+        idx.apply(parse_event("DIR", "T1 DIR private fechado re:pesquisa-x"))
+        assert idx.open_directives_for("CART") == [] and idx.open_directives_for("AUTH") == []
+
+    def test_non_author_private_re_is_noop(self):
+        idx = self._idx()
+        idx.apply(parse_event("DIR", "T0 DIR direct CART foque-no-carrinho texto"))
+        idx.apply(parse_event("AUTH", "T1 AUTH private x re:foque-no-carrinho"))
+        assert len(idx.open_directives_for("CART")) == 1

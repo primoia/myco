@@ -69,6 +69,7 @@ Exemplos:
 
 - **`ask`**: self-ask é rejeitado (target == sender → ignorado pelo daemon)
 - **`reply`**: resolve perguntas pendentes do target→sender. Com `re:`, resolve apenas a pergunta específica. Se `re:` não casar com nenhuma pergunta, o daemon faz fallback automático para o pareamento (target, replier) — assim um `re:` apontando para o msg id errado ainda fecha o ask em aberto. Sem `re:`, resolve todas as pendentes do par.
+- **Diretiva tem estado (v1.7)**: `direct` fica aberta (texto inteiro no painel) até o alvo emitir `done … re:<objeto>` ou `reply <autor> … re:<objeto>`; objeto = primeira palavra do texto (ou o `spec:`). Fechada rende uma linha `✓`; `ALL` fecha por sessão; só o alvo fecha. Lint: `done` sem `re:` com diretiva aberta, e `re:` sem casamento.
 - **`say`**: aparece na seção BROADCASTS de todas as views
 - **`private`** (aliases: `log`, `note`): NUNCA visível para outras sessões — só serve para registros internos e acks
 - **`up <recurso>`**: além de marcar o recurso UP, satisfaz qualquer `need <X>` em que `X` compartilhe um token hifenizado com o nome do recurso. Ex: `need backend-up-em-214-8080` é desbloqueado por `up backend addr:...`.
@@ -98,7 +99,7 @@ Eventos suportam pares `chave:valor` opcionais no campo de detalhe:
 | `ack:` | acuso de recebimento | `ack:msg/CART-001.md` |
 | `addr:` | endereço de rede (URL, host:port) | `addr:http://192.168.1.100:7777` |
 | `result:` | resultado de execução | `result:ok`, `result:fail`, `result:partial` |
-| `re:` | referência à pergunta sendo respondida | `re:msg/FRONT-010.md` |
+| `re:` | pergunta sendo respondida, ou diretiva sendo fechada (`done`/`reply`) | `re:msg/FRONT-010.md` / `re:faz-isso` |
 | `channel:` | canal(is) de visibilidade; padrão `global`; lista por vírgula | `channel:review-42` / `channel:sec,ops` |
 
 Exemplo completo:

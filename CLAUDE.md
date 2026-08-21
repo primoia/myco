@@ -46,6 +46,7 @@ Notas de comportamento:
 - Sessões são case-insensitive; `<DEST>` é normalizado para uppercase pelo daemon.
 - `up <recurso>` também satisfaz qualquer `need <X>` em que o nome do recurso apareça como uma das palavras separadas por `-` em X. Ex: `up backend` desbloqueia `need backend-up-em-214-8080`.
 - `reply` resolve o ask em aberto de DEST→você. Use `re:msg/...` para apontar uma pergunta específica; sem `re:` (ou se o `re:` não casar com nada), o daemon usa pareamento (asker, replier).
+- **Diretiva tem estado (v1.7).** Um `direct` fica ABERTO e aparece inteiro no painel até o destinatário fechá-lo: `done <objeto> re:<objeto-da-diretiva>` (ou `reply <autor> … re:<objeto-da-diretiva>` quando a diretiva é uma pergunta). O objeto da diretiva é a primeira palavra do texto dela (ou seu `spec:`). Fechada, ela vira uma linha `✓` (prova de que foi cumprida); diretiva para `ALL` fecha por sessão. O lint avisa `done` sem `re:` com diretiva aberta, e `re:` que não casa com nada.
 - O painel mostra a linha **AGORA** com seu último evento, qualquer que seja o verbo. Status (`active` / `idle` / `blocked`) só muda em `start` / `done` / `block`.
 - `direct` é emitido pelo DIRECTOR (ou pelo humano via DIRECTOR). Sessões worker recebem diretivas via painel — não emitem.
 - `log` e `note` são aliases legados de `private`. Comportamento idêntico.
@@ -80,7 +81,7 @@ Em qualquer verbo, anexe pares `chave:valor` ao final do detalhe:
 | `ack:` | ack de msg recebida | `ack:msg/CART-001.md` |
 | `addr:` | endereço de rede em `up` | `addr:http://192.168.1.100:7777` |
 | `result:` | em `done` | `result:ok` / `result:fail` / `result:partial` |
-| `re:` | pergunta sendo respondida em `reply` | `re:msg/CART-001.md` |
+| `re:` | pergunta sendo respondida em `reply`; em `done`/`reply`, diretiva sendo fechada | `re:msg/CART-001.md` / `re:foque-no-carrinho` |
 | `channel:` | canal(is) de visibilidade | `channel:review-42` ou `channel:sec,ops` |
 
 ## Comunicação rica via msg/
