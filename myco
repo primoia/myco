@@ -100,17 +100,34 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 # --- Always sync CLAUDE.md from myco repo ---
 cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
 
-# --- Resolve persona da sessão (projeto vence; myco é fallback) ---
+# --- Persona da sessão: UMA fonte viva, a do projeto ---
 # Injetada por PROCESSO via --append-system-prompt-file: várias sessões na
 # mesma pasta não colidem (nenhum arquivo de persona compartilhado em disco).
+#
+# $MYCO_DIR/personas/ são SEMENTES, nunca carregadas direto: na primeira
+# largada de uma sessão sem persona no projeto, a semente é copiada para
+# $PROJECT_DIR/docs/personas/ e é ESSA cópia que entra — e que vale dali em
+# diante. Editar a semente só afeta projetos futuros. (2026-08-21: regras
+# escritas na semente ficaram inertes por dias porque o projeto já tinha a
+# sua cópia, e nada dizia qual das duas estava valendo.)
 rm -f "$PROJECT_DIR/PERSONA.md"  # limpa resquício do esquema antigo
-for persona in "$PROJECT_DIR/docs/personas/$SESSION.md" "$MYCO_DIR/personas/$SESSION.md"; do
-    if [ -f "$persona" ]; then
-        CLAUDE_ARGS+=("--append-system-prompt-file" "$persona")
-        echo "[myco] persona=$SESSION ← $persona"
-        break
+PERSONA="$PROJECT_DIR/docs/personas/$SESSION.md"
+SEED="$MYCO_DIR/personas/$SESSION.md"
+if [ ! -f "$PERSONA" ] && [ -f "$SEED" ]; then
+    mkdir -p "$PROJECT_DIR/docs/personas"
+    cp "$SEED" "$PERSONA"
+    echo "[myco] persona=$SESSION semeada de $SEED → $PERSONA (edite AQUI; a semente não é mais lida)"
+fi
+if [ -f "$PERSONA" ]; then
+    CLAUDE_ARGS+=("--append-system-prompt-file" "$PERSONA")
+    if [ -f "$SEED" ] && ! cmp -s "$SEED" "$PERSONA"; then
+        echo "[myco] persona=$SESSION ← $PERSONA (a semente em $SEED diverge e NÃO é lida)"
+    else
+        echo "[myco] persona=$SESSION ← $PERSONA"
     fi
-done
+else
+    echo "[myco] persona=$SESSION: nenhuma (nem no projeto nem semente)"
+fi
 
 # --- Ensure .claude/settings.json has hooks ---
 SETTINGS_DIR="$PROJECT_DIR/.claude"

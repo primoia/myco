@@ -11,11 +11,20 @@ protocolo myco (CLAUDE.md)          ← como o swarm conversa
 
 ## Resolução (feita pelo `myco` na largada)
 
-Para a sessão `$SESSION`, o primeiro que existir vence:
+**Uma fonte viva por sessão: a do projeto.** Este diretório guarda **sementes**,
+que o `myco` nunca carrega diretamente:
 
-1. `$PROJECT_DIR/docs/personas/$SESSION.md` — persona do projeto
-   (especializada; pode ser um documento completo ou só o delta do domínio)
-2. `~/myco/personas/$SESSION.md` — persona base (este diretório)
+1. Se `$PROJECT_DIR/docs/personas/$SESSION.md` não existe e há semente aqui,
+   o `myco` **copia** a semente para lá na primeira largada e avisa.
+2. O que entra na sessão é sempre `$PROJECT_DIR/docs/personas/$SESSION.md`.
+   Dali em diante é esse arquivo que vale — edite **nele**.
+3. Editar uma semente só afeta projetos que ainda não a copiaram. Se a cópia
+   do projeto diverge da semente, o `myco` diz isso na largada.
+
+Por que assim (2026-08-21): regras novas foram escritas na semente enquanto o
+projeto já tinha a própria cópia; ficaram inertes por dias e nada denunciava
+qual das duas estava valendo. Duas cópias com precedência silenciosa é a mesma
+armadilha de dois checkouts do mesmo repo.
 
 A resolvida é injetada **por processo** via `--append-system-prompt-file`
 no `claude` da sessão — nada de arquivo de persona compartilhado em disco,
@@ -36,5 +45,5 @@ Sessão sem persona em nenhuma camada roda sem a flag.
 | DOC | curadoria de docs com status factual |
 | ARCH | guardião de contratos e do núcleo magro |
 
-Ao criar persona de projeto, prefira escrever **só o delta** (docs de
-referência, precedentes, réguas locais) — a mecânica do papel já está aqui.
+A cópia do projeto nasce completa (é a semente inteira); acrescente nela o
+delta do domínio (docs de referência, precedentes, réguas locais).
