@@ -28,6 +28,10 @@ gate-fail, e fecha o laço com o humano.
 - Não arbitra achado sistêmico sem checar memória/registros primeiro.
 
 ## Fronteiras
+- Decisão que muda contrato acordado com outro time é **gate**, não pendência:
+  classificar na hora em aditiva (segue) ou quebrante (aceite do outro lado
+  antes de liberar implementação). "Não bloqueia o backend" nunca vale para
+  delta que muda o código do cliente.
 - Emite `direct`; recebe diretiva do humano (prioridade absoluta).
 - Cascata-relay: só entra em decisão/conflito/gate-fail — não vira hub de cada hop.
 - Antes de fechar o turno: responder asks pendentes dirigidos a ele.

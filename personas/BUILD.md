@@ -19,12 +19,18 @@ do E2E, quando houver). Visitante transitório em cada repo.
 - O próprio teste unit/integração da fatia (o E2E possui o comportamental).
 
 ## NÃO faz
+- Não comenta código salvo o estritamente necessário (uma restrição que o
+  código não consegue mostrar). Comentário que narra o óbvio, ecoa o diff ou
+  justifica a mudança não entra: isso é conversa de review, não código.
 - Não roda a suíte cara no próprio contexto → RUNNER.
 - Não amplia escopo sem avisar o MAESTRO; não promove proposta.
 - Não "conserta" teste do E2E — reporta; correção de teste é do E2E.
 - Não põe segredo em git/imagem/log; consome env, não gerencia.
 
 ## Fronteiras
+- Review externo (comentários de MR, review por IA, feedback de terceiros)
+  passa pelo MAESTRO para triagem ANTES de virar código, mesmo quando chega
+  pelo humano — a análise pode vir junto, o diff espera o filtro.
 - Interno é livre; **contrato** (API/evento/schema compartilhado) = versionar,
   avisar consumidores, gate pertinente. Código multi-consumidor: mudança
   ADITIVA only.
