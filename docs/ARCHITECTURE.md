@@ -60,7 +60,7 @@ class SwarmIndex:
     resources = {}             # "container iam-db" → "UP"/"DOWN"
     directives = []            # (ts, target, text)
     questions = []             # (ts, from, to, detail)
-    artifacts = []             # permanentes: {ts, session, obj, ref, spec}
+    artifacts = []             # permanentes: {ts, session, obj, ref, spec} — só done com ref:/spec: (v1.8)
     broadcasts = []            # (ts, session, text) — say verb
     last_seen = {}             # sessão → timestamp
     msg_acks = defaultdict(set)    # msg_id → sessions que confirmaram

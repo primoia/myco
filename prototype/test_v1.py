@@ -262,9 +262,8 @@ class TestSwarmIndexApply:
         assert idx.session_status["AUTH"] == "idle"
         assert "login" in idx.provides["AUTH"]
         assert "AUTH.login" in idx.provides["AUTH"]
-        assert len(idx.artifacts) == 1
-        assert idx.artifacts[0]["ref"] == ""
-        assert idx.artifacts[0]["spec"] == ""
+        # v1.8: a bare done is status + provides, not an artifact
+        assert len(idx.artifacts) == 0
 
     def test_done_with_kvs(self):
         idx = SwarmIndex()
@@ -274,9 +273,9 @@ class TestSwarmIndexApply:
 
     def test_multiple_done_accumulate_artifacts(self):
         idx = SwarmIndex()
-        idx.apply(self._ev("AUTH", "T0 AUTH done api-v1"))
+        idx.apply(self._ev("AUTH", "T0 AUTH done api-v1 ref:v1"))
         idx.apply(self._ev("AUTH", "T1 AUTH done api-v2 ref:v2"))
-        idx.apply(self._ev("CART", "T2 CART done cart-service"))
+        idx.apply(self._ev("CART", "T2 CART done cart-service spec:msg/CART-001.md"))
         assert len(idx.artifacts) == 3
 
     def test_need(self):
@@ -722,15 +721,15 @@ class TestRenderViewWorker:
     def test_artifacts_table(self):
         idx = SwarmIndex()
         idx.apply(parse_event("AUTH", "T0 AUTH done api ref:origin/main spec:msg/A.md"))
-        idx.apply(parse_event("CART", "T1 CART done cart"))
+        idx.apply(parse_event("CART", "T1 CART done cart spec:msg/C.md"))
         # Without session_dirs, path column shows —
         view = render_view(idx, "AUTH")
         assert "| AUTH | api | origin/main | — | — | msg/A.md |" in view
-        assert "| CART | cart | — | — | — | — |" in view
+        assert "| CART | cart | — | — | — | msg/C.md |" in view
         # With session_dirs, path column shows the dir
         view2 = render_view(idx, "AUTH", session_dirs={"AUTH": "/tmp/a", "CART": "/tmp/b"})
         assert "| AUTH | api | origin/main | — | /tmp/a | msg/A.md |" in view2
-        assert "| CART | cart | — | — | /tmp/b | — |" in view2
+        assert "| CART | cart | — | — | /tmp/b | msg/C.md |" in view2
 
     def test_no_artifacts_message(self):
         idx = SwarmIndex()
@@ -900,11 +899,12 @@ class TestBackwardCompat:
     def test_mixed_v0_v1_events(self):
         """Mix of v0 and v1 events in same index."""
         idx = SwarmIndex()
-        idx.apply(parse_event("AUTH", "T0 AUTH done login"))  # v0
+        idx.apply(parse_event("AUTH", "T0 AUTH done login"))  # v0 — status only (v1.8)
         idx.apply(parse_event("AUTH", "T1 AUTH done api ref:origin/main"))  # v1
-        assert len(idx.artifacts) == 2
-        assert idx.artifacts[0]["ref"] == ""
-        assert idx.artifacts[1]["ref"] == "origin/main"
+        assert idx.session_status["AUTH"] == "idle"
+        assert "login" in idx.provides["AUTH"]
+        assert len(idx.artifacts) == 1
+        assert idx.artifacts[0]["ref"] == "origin/main"
 
 
 # ============================================================
@@ -2430,7 +2430,7 @@ class TestResultOnDone:
 
     def test_result_fail_in_view(self):
         idx = SwarmIndex()
-        idx.apply(parse_event("AUTH", "T0 AUTH done smoke result:fail"))
+        idx.apply(parse_event("AUTH", "T0 AUTH done smoke result:fail ref:smoke.sh"))
         view = render_view(idx, "AUTH")
         assert "| fail |" in view
 
@@ -3021,7 +3021,7 @@ class TestLintWrongVerb:
         idx = SwarmIndex()
         for verb_line in [
             "T0 X start task",
-            "T0 X done task",
+            "T0 X done task ref:x",
             "T0 X say something",
             "T0 X ask Y question",
             "T0 X up backend",
@@ -3289,7 +3289,7 @@ class TestArtifactsPanelCap:
         idx = SwarmIndex()
         total = ARTIFACTS_PANEL_CAP + 5
         for i in range(total):
-            idx.apply(parse_event("DEV", f"2026-06-01T00:00:{i:02d} DEV done task-{i:02d} result:ok"))
+            idx.apply(parse_event("DEV", f"2026-06-01T00:00:{i:02d} DEV done task-{i:02d} result:ok ref:t{i}"))
         view = render_view(idx, "DEV")
         section = view.split("## ARTEFATOS PUBLICADOS")[1].split("##")[0]
         for i in range(5):
@@ -3300,8 +3300,8 @@ class TestArtifactsPanelCap:
 
     def test_under_cap_shows_all_no_note(self):
         idx = SwarmIndex()
-        idx.apply(parse_event("DEV", "2026-06-01T00:00:00 DEV done task-a result:ok"))
-        idx.apply(parse_event("DEV", "2026-06-01T00:00:01 DEV done task-b result:ok"))
+        idx.apply(parse_event("DEV", "2026-06-01T00:00:00 DEV done task-a result:ok ref:a"))
+        idx.apply(parse_event("DEV", "2026-06-01T00:00:01 DEV done task-b result:ok ref:b"))
         view = render_view(idx, "DEV")
         section = view.split("## ARTEFATOS PUBLICADOS")[1].split("##")[0]
         assert "task-a" in section and "task-b" in section
@@ -3368,7 +3368,7 @@ class TestLintSwallowedHandoff:
     def test_done_with_pending_ask_warns(self):
         idx = SwarmIndex()
         idx.apply(self._ev("DEV", "T0 DEV ask E2E arbitrar-uc-038"))
-        warnings = idx.lint_event(self._ev("E2E", "T1 E2E done outra-tarefa result:ok"))
+        warnings = idx.lint_event(self._ev("E2E", "T1 E2E done outra-tarefa result:ok ref:x"))
         assert len(warnings) == 1
         assert "1 pending ask(s) for you" in warnings[0]
         assert "DEV→you: arbitrar-uc-038" in warnings[0]
@@ -3383,24 +3383,24 @@ class TestLintSwallowedHandoff:
 
     def test_done_without_pending_ask_no_warning(self):
         idx = SwarmIndex()
-        assert idx.lint_event(self._ev("E2E", "T0 E2E done tarefa result:ok")) == []
+        assert idx.lint_event(self._ev("E2E", "T0 E2E done tarefa result:ok ref:x")) == []
 
     def test_done_with_ask_for_other_session_no_warning(self):
         idx = SwarmIndex()
         idx.apply(self._ev("DEV", "T0 DEV ask FRONT revisar-tela"))
-        assert idx.lint_event(self._ev("E2E", "T1 E2E done tarefa")) == []
+        assert idx.lint_event(self._ev("E2E", "T1 E2E done tarefa ref:x")) == []
 
     def test_done_after_reply_no_warning(self):
         idx = SwarmIndex()
         idx.apply(self._ev("DEV", "T0 DEV ask E2E arbitrar-uc-038"))
         idx.apply(self._ev("E2E", "T1 E2E reply DEV arbitrado-verde"))
-        assert idx.lint_event(self._ev("E2E", "T2 E2E done arbitragem result:ok")) == []
+        assert idx.lint_event(self._ev("E2E", "T2 E2E done arbitragem result:ok ref:x")) == []
 
     def test_done_with_multiple_pending_asks_counts_all(self):
         idx = SwarmIndex()
         idx.apply(self._ev("DEV", "T0 DEV ask E2E pergunta-um"))
         idx.apply(self._ev("FRONT", "T1 FRONT ask E2E pergunta-dois"))
-        warnings = idx.lint_event(self._ev("E2E", "T2 E2E done tarefa"))
+        warnings = idx.lint_event(self._ev("E2E", "T2 E2E done tarefa ref:x"))
         assert len(warnings) == 1
         assert "2 pending ask(s)" in warnings[0]
         assert "DEV" in warnings[0] and "FRONT" in warnings[0]
@@ -3409,7 +3409,7 @@ class TestLintSwallowedHandoff:
         """Asks YOU sent (waiting on a peer) must not flag your own done."""
         idx = SwarmIndex()
         idx.apply(self._ev("E2E", "T0 E2E ask DEV qual-branch"))
-        assert idx.lint_event(self._ev("E2E", "T1 E2E done suite-rodada result:ok")) == []
+        assert idx.lint_event(self._ev("E2E", "T1 E2E done suite-rodada result:ok ref:x")) == []
 
 
 # ============================================================
@@ -4084,3 +4084,47 @@ class TestDirectiveState:
         assert idx.directive_meta[("T0", "CART")]["obj"] == "RE-GATE"
         idx.apply(parse_event("CART", "T1 CART done x re:RE-GATE"))
         assert idx.open_directives_for("CART") == []
+
+
+# ============================================================
+# v1.8: only done with ref:/spec: is an artifact; bare done still works
+# ============================================================
+
+class TestArtifactRequiresProof:
+    def test_bare_done_is_not_an_artifact_but_keeps_effects(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH start login"))
+        idx.apply(parse_event("CART", "T1 CART need AUTH.login"))
+        idx.apply(parse_event("AUTH", "T2 AUTH done login"))
+        assert idx.session_status["AUTH"] == "idle"
+        assert "AUTH.login" in idx.provides["AUTH"]      # need still satisfied
+        assert idx.artifacts == []
+        view = render_view(idx, "CART")
+        assert "Nenhum artefato publicado." in view
+
+    def test_ack_done_closes_directive_without_artifact(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("MAESTRO", "T0 MAESTRO direct PREVIEW leia-tradeoff spec:msg/M-1.md"))
+        idx.apply(parse_event("PREVIEW", "T1 PREVIEW done leitura-tradeoff re:leia-tradeoff"))
+        assert idx.artifacts == []
+        assert not [m for _, t, _, m in idx.open_directives_for("PREVIEW") if m and t == "PREVIEW"]
+
+    def test_done_with_ref_or_spec_is_an_artifact(self):
+        idx = SwarmIndex()
+        idx.apply(parse_event("AUTH", "T0 AUTH done api ref:origin/main"))
+        idx.apply(parse_event("CART", "T1 CART done contract spec:msg/CART-001.md"))
+        assert [a["obj"] for a in idx.artifacts] == ["api", "contract"]
+        view = render_view(idx, "AUTH")
+        assert "| AUTH | api | origin/main |" in view
+        assert "| CART | contract | — |" in view
+
+    def test_lint_warns_bare_done_only(self):
+        idx = SwarmIndex()
+        bare = idx.lint_event(parse_event("AUTH", "T0 AUTH done api"))
+        assert any("not listed in ARTEFATOS" in w for w in bare)
+        assert not idx.lint_event(parse_event("AUTH", "T1 AUTH done api ref:origin/main"))
+        assert not idx.lint_event(parse_event("AUTH", "T2 AUTH done api spec:msg/X.md")) or \
+            all("ARTEFATOS" not in w for w in idx.lint_event(parse_event("AUTH", "T2 AUTH done api spec:msg/X.md")))
+        idx.apply(parse_event("MAESTRO", "T3 MAESTRO direct AUTH foque-no-login"))
+        ack = idx.lint_event(parse_event("AUTH", "T4 AUTH done ack re:foque-no-login"))
+        assert all("ARTEFATOS" not in w for w in ack)

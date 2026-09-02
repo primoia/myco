@@ -325,15 +325,23 @@ class SwarmIndex:
             artifact = f"{s}.{obj}"
             self.provides[s].add(artifact)
             self.provides[s].add(obj)
-            # v1: permanent artifact record
-            self.artifacts.append({
-                "ts": ev["ts"],
-                "session": s,
-                "obj": obj,
-                "ref": kvs.get("ref", ""),
-                "spec": kvs.get("spec", ""),
-                "result": kvs.get("result", ""),
-            })
+            # v1: permanent artifact record.
+            # v1.8: only a `done` that carries a proof (`ref:` or `spec:`)
+            # becomes an artifact. Since v1.7 made `done … re:<obj>` the way to
+            # close a directive, bare acks flooded ARTEFATOS PUBLICADOS (an
+            # inventory of deliverables, injected into every panel). A bare
+            # `done` still flips status, still satisfies `need` (provides
+            # above) and still closes its directive below — it just isn't
+            # listed as something another session can pick up.
+            if kvs.get("ref") or kvs.get("spec"):
+                self.artifacts.append({
+                    "ts": ev["ts"],
+                    "session": s,
+                    "obj": obj,
+                    "ref": kvs.get("ref", ""),
+                    "spec": kvs.get("spec", ""),
+                    "result": kvs.get("result", ""),
+                })
             # v1.7: `done … re:<obj>` closes the directive this done fulfils.
             re_id = kvs.get("re")
             if re_id:
@@ -518,6 +526,8 @@ class SwarmIndex:
            session is closing (or moving to) a turn with an unanswered
            handoff in its own queue; the chain silently stalls until a
            human pokes it (MAESTRO-010 P2).
+        f. `done` with no `ref:`/`spec:`/`re:` → not an artifact (v1.8);
+           tell the sender so a missing proof is visible.
         """
         warnings = []
         s = ev["session"]
@@ -600,6 +610,21 @@ class SwarmIndex:
                         f"for you are open ({shown}). Add re:<obj> to close "
                         f"the one this done fulfils."
                     )
+
+        # f. v1.8: `done` with neither ref:/spec: (proof) nor re: (ack of a
+        # directive) → it is not listed in ARTEFATOS PUBLICADOS. Say so, so a
+        # forgotten proof doesn't look like a delivered one. Acks (re:) are
+        # exempt: closing a directive without a deliverable is their job.
+        if verb == "done":
+            k = ev.get("kvs", {})
+            if not (k.get("ref") or k.get("spec") or k.get("re")):
+                warnings.append(
+                    f"done {obj}: no ref:/spec: — not listed in ARTEFATOS "
+                    f"PUBLICADOS (status, need and re: effects still apply). "
+                    f"If this is a deliverable, add ref:<branch|sha> or "
+                    f"spec:msg/…; if it only acknowledges a `direct`, add "
+                    f"re:<obj>."
+                )
 
         # c. spec: pointer to a msg that doesn't exist → dangling reference
         spec_id = ev.get("kvs", {}).get("spec")

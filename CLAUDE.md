@@ -6,7 +6,7 @@ A coordenação acontece por dois canais:
 
 - **Entrada:** um painel marcado com `<!-- myco protocol v1 -->` chega injetado no início de todo prompt. Mostra seu status, diretivas, artefatos publicados, bloqueadores, dependentes, recursos compartilhados, eventos recentes e mensagens pendentes. Confie no painel — ele substitui qualquer investigação que você faria pra reconstruir contexto.
 
-- **Saída:** anexe **UM** bloco `<myco>` no fim de qualquer resposta onde você tomou ação. Um hook captura e despacha o bloco. Não rode comandos pra "logar" e não escreva em arquivos de log — o bloco é o canal único.
+- **Saída:** anexe **UM** bloco `<myco>` no fim de qualquer resposta onde você tomou ação. Um hook captura e despacha o bloco. Não rode comandos pra "logar" e não escreva em arquivos de log — o bloco é o canal normal. **Única exceção:** evento que cria msg (`msgs:` inline) vai por `curl` direto no `/events`, porque o hook do bloco descarta `msgs:`; nesse caso NÃO repita o evento no bloco (duplica).
 
 ```
 <myco>
@@ -47,6 +47,7 @@ Notas de comportamento:
 - `up <recurso>` também satisfaz qualquer `need <X>` em que o nome do recurso apareça como uma das palavras separadas por `-` em X. Ex: `up backend` desbloqueia `need backend-up-em-214-8080`.
 - `reply` resolve o ask em aberto de DEST→você. Use `re:msg/...` para apontar uma pergunta específica; sem `re:` (ou se o `re:` não casar com nada), o daemon usa pareamento (asker, replier).
 - **Diretiva tem estado (v1.7).** Um `direct` fica ABERTO e aparece inteiro no painel até o destinatário fechá-lo: `done <objeto> re:<objeto-da-diretiva>` (ou `reply <autor> … re:<objeto-da-diretiva>` quando a diretiva é uma pergunta). O objeto da diretiva é a primeira palavra do texto dela (ou seu `spec:`). Fechada, ela vira uma linha `✓` (prova de que foi cumprida); diretiva para `ALL` fecha por sessão. O lint avisa `done` sem `re:` com diretiva aberta, e `re:` que não casa com nada.
+- **Artefato exige prova (v1.8).** Só `done` com `ref:` ou `spec:` entra em ARTEFATOS PUBLICADOS. `done` sem eles continua fechando diretiva (`re:`), mudando status e satisfazendo `need` — só não vira linha de inventário. O lint avisa um `done` sem `ref:`/`spec:`/`re:`.
 - O painel mostra a linha **AGORA** com seu último evento, qualquer que seja o verbo. Status (`active` / `idle` / `blocked`) só muda em `start` / `done` / `block`.
 - `direct` é emitido pelo DIRECTOR (ou pelo humano via DIRECTOR). Sessões worker recebem diretivas via painel — não emitem.
 - `log` e `note` são aliases legados de `private`. Comportamento idêntico.
