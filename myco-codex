@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+#
+# myco-codex — launch an OpenAI Codex CLI session connected to a myco swarm
+#
+# Same contract as `myco`, different agent. Everything the Claude launcher
+# does through Claude-only files is mapped to Codex equivalents:
+#
+#   Claude Code                         Codex CLI
+#   ----------------------------------  ------------------------------------------
+#   cp CLAUDE.md (protocol) → project   protocol passed as developer_instructions
+#   --append-system-prompt-file persona persona appended to developer_instructions
+#   .claude/settings.json hooks         -c hooks.Stop / hooks.UserPromptSubmit
+#                                       (same two hook scripts)
+#
+# Nothing is written to the project: CLAUDE.md is left alone (Claude sessions
+# in the same folder own it) and the hooks go in as per-process config
+# overrides. Codex reads the project's AGENTS.md on its own.
+#
+# Usage:
+#   myco-codex <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume [SESSION_ID]] [-- codex_flags...]
+#
+# Examples:
+#   myco-codex CODEX ~/Workspace/primoia --daemon http://192.168.0.119:8000 --tenant prd-...
+#   myco-codex CODEX . -- -m gpt-5.6-sol
+#   myco-codex CODEX . --resume                      # most recent Codex session (codex resume --last)
+#   myco-codex CODEX . --resume <codex-session-uuid> # a specific one (id from `codex resume` picker)
+#   myco-codex CODEX . --dangerously-skip-permissions  # no approval prompts (Claude's flag, translated)
+#
+# Hook trust: Codex may ask you to review the hooks before running them.
+# Approve them in the TUI. For non-interactive tests only, pass
+# `-- --dangerously-bypass-hook-trust`.
+#
+# Network: the protocol needs `curl` to the daemon for `msgs:` (the hook drops
+# inline msgs). The workspace-write sandbox blocks network by default, so this
+# launcher turns sandbox_workspace_write.network_access on. The hooks themselves
+# run outside the sandbox.
+#
+set -euo pipefail
+
+MYCO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+if [ $# -lt 1 ]; then
+    echo "usage: myco-codex <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume [SESSION_ID]] [-- codex_flags...]" >&2
+    exit 2
+fi
+
+command -v codex >/dev/null || { echo "error: codex not found in PATH" >&2; exit 2; }
+
+SESSION="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
+shift
+
+PROJECT_DIR="."
+CODEX_ARGS=()
+RESUME=false
+RESUME_ID=""
+TENANT_TOKEN=""
+DAEMON_URL=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --daemon)
+            [ $# -ge 2 ] || { echo "error: --daemon requires a URL argument" >&2; exit 2; }
+            DAEMON_URL="$2"; shift 2 ;;
+        --tenant|--channel)
+            [ $# -ge 2 ] || { echo "error: $1 requires a token argument" >&2; exit 2; }
+            TENANT_TOKEN="$2"; shift 2 ;;
+        --dangerously-skip-permissions)
+            # Claude's flag, accepted so the same command line works for both
+            # launchers. Codex splits it in two: tool approvals/sandbox, and
+            # the review prompt for hooks (ours are always the same two).
+            CODEX_ARGS+=("--dangerously-bypass-approvals-and-sandbox" "--dangerously-bypass-hook-trust")
+            shift ;;
+        --resume|-r)
+            RESUME=true
+            if [ $# -ge 2 ] && [ "${2#-}" = "$2" ] && [ ! -d "$2" ]; then
+                RESUME_ID="$2"; shift 2
+            else
+                shift
+            fi ;;
+        --)
+            shift; CODEX_ARGS+=("$@"); break ;;
+        *)
+            if [ "$PROJECT_DIR" = "." ] && [ -d "$1" ]; then
+                PROJECT_DIR="$1"
+            else
+                CODEX_ARGS+=("$1")
+            fi
+            shift ;;
+    esac
+done
+
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# --- Persona: same single live source as `myco` (docs/personas/<SESSION>.md) ---
+PERSONA="$PROJECT_DIR/docs/personas/$SESSION.md"
+SEED="$MYCO_DIR/personas/$SESSION.md"
+if [ ! -f "$PERSONA" ] && [ -f "$SEED" ]; then
+    mkdir -p "$PROJECT_DIR/docs/personas"
+    cp "$SEED" "$PERSONA"
+    echo "[myco-codex] persona=$SESSION semeada de $SEED → $PERSONA (edite AQUI; a semente não é mais lida)"
+fi
+if [ -f "$PERSONA" ]; then
+    echo "[myco-codex] persona=$SESSION ← $PERSONA"
+else
+    echo "[myco-codex] persona=$SESSION: nenhuma (nem no projeto nem semente)"
+    PERSONA=""
+fi
+
+# --- Instructions: Codex adapter note + myco protocol + persona ---
+# Passed as a TOML basic string. JSON string escaping is a subset TOML accepts
+# (json.dumps never emits `\/`), so the text arrives byte-for-byte.
+DEV_INSTRUCTIONS="$(python3 - "$MYCO_DIR/CLAUDE.md" "$PERSONA" <<'PY'
+import json, sys
+proto_path, persona_path = sys.argv[1], sys.argv[2]
+adapter = """# myco no Codex CLI
+
+Você roda no **Codex CLI**, não no Claude Code. O protocolo abaixo foi escrito
+para o Claude Code e vale igual aqui, com estas traduções:
+
+- "CLAUDE.md do myco" = este texto. Não crie nem edite CLAUDE.md no projeto:
+  ele pertence às sessões Claude da mesma pasta.
+- O painel `<!-- myco protocol v1 -->` chega como contexto extra junto de cada
+  prompt do humano (hook UserPromptSubmit).
+- O bloco `<myco>` precisa estar na sua **mensagem final** do turno. O hook
+  Stop lê só essa mensagem; bloco em mensagem intermediária se perde.
+- `msgs:` inline continua exigindo `curl` para `$MYCO_URL/events`, com
+  `$MYCO_TOKEN` e `$MYCO_SESSION` do ambiente.
+"""
+parts = [adapter, open(proto_path, encoding="utf-8").read()]
+if persona_path:
+    parts.append("# Persona da sessão\n\n" + open(persona_path, encoding="utf-8").read())
+print(json.dumps("\n\n".join(parts), ensure_ascii=False))
+PY
+)"
+
+# --- Hooks: passed as config overrides, nothing written to the project ---
+# Codex only reads hooks.json inside plugins; user/project hooks live in the
+# `[hooks]` table of config.toml (verified 2026-09-21 on codex-cli 0.155.1 —
+# a .codex/hooks.json in the project was silently ignored). Same TOML shape
+# as Claude's settings.json hooks.
+HOOK_STOP="hooks.Stop=[{hooks=[{type=\"command\",command=\"python3 $MYCO_DIR/prototype/myco_hook.py\"}]}]"
+HOOK_PROMPT="hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=\"python3 $MYCO_DIR/prototype/myco_prompt_hook.py\"}]}]"
+
+# --- Export env vars and launch ---
+export MYCO_SESSION="$SESSION"
+export MYCO_INJECT_VIEW=1
+if [ -n "$DAEMON_URL" ]; then
+    export MYCO_URL="$DAEMON_URL"
+else
+    export MYCO_URL="${MYCO_URL:-http://localhost:8000}"
+fi
+if [ -n "$TENANT_TOKEN" ]; then
+    export MYCO_TOKEN="$TENANT_TOKEN"
+fi
+
+echo "[myco-codex] session=$SESSION project=$PROJECT_DIR"
+echo "[myco-codex] daemon=$MYCO_URL"
+if [ -n "${MYCO_TOKEN:-}" ]; then
+    echo "[myco-codex] tenant token configured (${#MYCO_TOKEN} chars)"
+fi
+
+CMD=(codex)
+if [ "$RESUME" = true ]; then
+    if [ -n "$RESUME_ID" ]; then
+        CMD+=(resume "$RESUME_ID")
+    else
+        CMD+=(resume --last)
+    fi
+    echo "[myco-codex] resuming previous session${RESUME_ID:+ ($RESUME_ID)}"
+fi
+CMD+=(-C "$PROJECT_DIR"
+      -c "developer_instructions=$DEV_INSTRUCTIONS"
+      -c "$HOOK_STOP"
+      -c "$HOOK_PROMPT"
+      -c "sandbox_workspace_write.network_access=true")
+
+cd "$PROJECT_DIR"
+exec "${CMD[@]}" "${CODEX_ARGS[@]}"
