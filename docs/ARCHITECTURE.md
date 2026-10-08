@@ -116,8 +116,8 @@ Script bash na raiz do repo. Automatiza o setup completo de uma sessão:
 ```
 
 O que faz:
-1. Copia `CLAUDE.md` para o projeto alvo (sempre sincroniza)
-2. Cria `.claude/settings.json` com os hooks apontando para o repo myco
+1. Monta um system prompt com `CLAUDE.md` + persona e passa via `--append-system-prompt-file`
+2. Gera um settings JSON com os hooks apontando para o repo myco e passa via `--settings` (nada é escrito no projeto; desde 2026-10-08)
 3. Exporta `MYCO_SESSION`, `MYCO_INJECT_VIEW=1`, `MYCO_URL`
 4. Executa `claude` no diretório do projeto
 

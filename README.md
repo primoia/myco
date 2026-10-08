@@ -157,8 +157,8 @@ The `myco` script in the repo root automates the full session setup:
 ```
 
 What it does:
-- Copies `CLAUDE.md` (the protocol instructions) into the target project
-- Creates `.claude/settings.json` with the hooks configured
+- Passes `CLAUDE.md` (the protocol instructions) plus the session persona via `--append-system-prompt-file`
+- Passes the hooks via `--settings` — nothing is written into the target project; its own `CLAUDE.md`/`AGENTS.md` loads natively
 - Exports `MYCO_SESSION`, `MYCO_URL`, `MYCO_INJECT_VIEW`
 - Runs `claude` in the project directory
 
@@ -234,7 +234,7 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 
 ## Known limitations
 
-- **Session instructions in Portuguese.** The launcher copies `CLAUDE.md` (in Portuguese) into each session's project directory. Sessions read it on every prompt to learn the protocol. An English version of this file is on the roadmap — until then, sessions started by the launcher will operate with Portuguese protocol instructions (which all current LLMs handle fine, but is awkward for non-PT contributors reading the source). Workaround: edit `CLAUDE.md` after `./myco` runs, or maintain your own English copy and point the launcher at it.
+- **Session instructions in Portuguese.** The launcher injects `CLAUDE.md` (in Portuguese) into each session's system prompt. Sessions read it on every prompt to learn the protocol. An English version of this file is on the roadmap — until then, sessions started by the launcher will operate with Portuguese protocol instructions (which all current LLMs handle fine, but is awkward for non-PT contributors reading the source). Workaround: maintain your own English copy of `CLAUDE.md` in the myco directory.
 - **Hooks are Claude Code specific.** The wire protocol (events, views, msg/) is plain HTTP and works with anything. The hook contract (Stop/UserPromptSubmit) is currently Claude Code's. Adapters for Aider, Codex, Continue, etc. are glue work — contributions welcome.
 - **Daemon bugs catalogued.** A few non-blocking daemon issues are documented in [`examples/heterogeneous-swarm/evaluations/`](examples/heterogeneous-swarm/evaluations/) (the empty `msg/?session=` response, duplicate events, pending-messages not clearing on ack). Fixes pending.
 

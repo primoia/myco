@@ -7,14 +7,14 @@
 #
 #   Claude Code                         Codex CLI
 #   ----------------------------------  ------------------------------------------
-#   cp CLAUDE.md (protocol) → project   protocol passed as developer_instructions
-#   --append-system-prompt-file persona persona appended to developer_instructions
-#   .claude/settings.json hooks         -c hooks.Stop / hooks.UserPromptSubmit
+#   --append-system-prompt-file         protocol + persona passed as
+#     (protocol + persona)                developer_instructions
+#   --settings hooks                    -c hooks.Stop / hooks.UserPromptSubmit
 #                                       (same two hook scripts)
 #
-# Nothing is written to the project: CLAUDE.md is left alone (Claude sessions
-# in the same folder own it) and the hooks go in as per-process config
-# overrides. Codex reads the project's AGENTS.md on its own.
+# Neither launcher writes anything to the project (since 2026-10-08 on the
+# Claude side too). Both agents read the project's CLAUDE.md / AGENTS.md on
+# their own.
 #
 # Usage:
 #   myco-codex <SESSION> [project_dir] [--daemon URL] [--tenant TOKEN] [--resume [SESSION_ID]] [-- codex_flags...]
@@ -109,7 +109,7 @@ fi
 # --- Instructions: Codex adapter note + myco protocol + persona ---
 # Passed as a TOML basic string. JSON string escaping is a subset TOML accepts
 # (json.dumps never emits `\/`), so the text arrives byte-for-byte.
-DEV_INSTRUCTIONS="$(python3 - "$MYCO_DIR/CLAUDE.md" "$PERSONA" <<'PY'
+DEV_INSTRUCTIONS="$(MYCO_SESSION_FOR_HEADER="$SESSION" python3 - "$MYCO_DIR/CLAUDE.md" "$PERSONA" <<'PY'
 import json, sys
 proto_path, persona_path = sys.argv[1], sys.argv[2]
 adapter = """# myco no Codex CLI
@@ -118,7 +118,7 @@ Você roda no **Codex CLI**, não no Claude Code. O protocolo abaixo foi escrito
 para o Claude Code e vale igual aqui, com estas traduções:
 
 - "CLAUDE.md do myco" = este texto. Não crie nem edite CLAUDE.md no projeto:
-  ele pertence às sessões Claude da mesma pasta.
+  o que existir lá (CLAUDE.md ou AGENTS.md) é do projeto.
 - O painel `<!-- myco protocol v1 -->` chega como contexto extra junto de cada
   prompt do humano (hook UserPromptSubmit).
 - O bloco `<myco>` precisa estar na sua **mensagem final** do turno. O hook
@@ -126,7 +126,10 @@ para o Claude Code e vale igual aqui, com estas traduções:
 - `msgs:` inline continua exigindo `curl` para `$MYCO_URL/events`, com
   `$MYCO_TOKEN` e `$MYCO_SESSION` do ambiente.
 """
-parts = [adapter, open(proto_path, encoding="utf-8").read()]
+import os
+session = os.environ.get("MYCO_SESSION_FOR_HEADER", "")
+header = f"# Sua sessão myco é **{session}** (MYCO_SESSION={session})\n" if session else ""
+parts = [header + adapter, open(proto_path, encoding="utf-8").read()]
 if persona_path:
     parts.append("# Persona da sessão\n\n" + open(persona_path, encoding="utf-8").read())
 print(json.dumps("\n\n".join(parts), ensure_ascii=False))

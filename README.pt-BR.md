@@ -97,8 +97,8 @@ O script `myco` na raiz do repo automatiza todo o setup de uma sessão:
 ```
 
 O que ele faz:
-- Copia `CLAUDE.md` (instruções do protocolo) para o projeto alvo
-- Cria `.claude/settings.json` com os hooks configurados
+- Passa `CLAUDE.md` (instruções do protocolo) mais a persona da sessão via `--append-system-prompt-file`
+- Passa os hooks via `--settings` — nada é escrito no projeto alvo; o `CLAUDE.md`/`AGENTS.md` dele carrega nativamente
 - Exporta `MYCO_SESSION`, `MYCO_URL`, `MYCO_INJECT_VIEW`
 - Executa `claude` no diretório do projeto
 

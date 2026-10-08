@@ -144,7 +144,4 @@ Read peers/AUTH/index.js
 5. Em `done`, use `ref:` (branch/tag) e `result:` (ok/fail/partial).
 6. Bloqueado sem saber pra quem perguntar? `ask DIRECTOR <pergunta>`.
 7. Foco no que o humano pediu — o swarm é coordenação, não trabalho extra.
-8. Docs de direção: execute só contra direção **ratificada pelo humano**. Proposta escrita por sessão de IA nasce como proposta — não é roadmap, e só o humano promove. O projeto define a convenção (veja `AGENTS.md`).
-
-# Contexto do projeto
-@AGENTS.md
+8. Docs de direção: execute só contra direção **ratificada pelo humano**. Proposta escrita por sessão de IA nasce como proposta — não é roadmap, e só o humano promove. O projeto define a convenção no seu próprio `CLAUDE.md` ou `AGENTS.md`, que o Claude Code carrega nativamente.

@@ -97,8 +97,41 @@ done
 
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
-# --- Always sync CLAUDE.md from myco repo ---
-cp "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
+# --- Freios ---
+if [ "$PROJECT_DIR" = "$HOME" ] || [ "$PROJECT_DIR" = "/" ]; then
+    echo "error: project_dir=$PROJECT_DIR — recuso lançar na home ou na raiz (um CLAUDE.md ali vaza para todas as sessões abaixo)" >&2
+    exit 2
+fi
+if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "[myco] aviso: $PROJECT_DIR não é um repositório git"
+fi
+
+# --- Nada é escrito no projeto (2026-10-08) ---
+# Antes o launcher copiava CLAUDE.md para a raiz do projeto e criava
+# .claude/settings.json com os hooks. Isso sujava o git de cada repo, exigia
+# .gitignore + aviso no AGENTS.md do projeto, e um launch com project_dir=~
+# deixou um CLAUDE.md na home que suprimia o AGENTS.md de todo projeto abaixo
+# (Claude Code ≥ 2.1.277 lê AGENTS.md nativamente, mas só sem CLAUDE.md na
+# pasta ou acima). Agora: protocolo + persona vão por
+# --append-system-prompt-file, hooks por --settings. O CLAUDE.md / AGENTS.md
+# do projeto carrega nativamente, intocado. (Mesmo contrato do myco-codex.)
+LAUNCH_DIR="$MYCO_DIR/tmp/launch"
+mkdir -p "$LAUNCH_DIR"
+find "$LAUNCH_DIR" -type f -mtime +7 -delete 2>/dev/null || true
+SYS_FILE="$LAUNCH_DIR/$SESSION-$$.system.md"
+SETTINGS_FILE="$LAUNCH_DIR/$SESSION-$$.settings.json"
+
+# Migração: um CLAUDE.md idêntico ao do myco deixado por versão antiga é lixo
+# do launcher, não do projeto — remove. Qualquer outro conteúdo fica.
+if [ -f "$PROJECT_DIR/CLAUDE.md" ] && cmp -s "$MYCO_DIR/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"; then
+    rm -f "$PROJECT_DIR/CLAUDE.md"
+    echo "[myco] removido $PROJECT_DIR/CLAUDE.md (cópia antiga do launcher; o protocolo agora vai pelo system prompt)"
+fi
+
+{
+    printf '# Sua sessão myco é **%s** (MYCO_SESSION=%s)\n\n' "$SESSION" "$SESSION"
+    cat "$MYCO_DIR/CLAUDE.md"
+} > "$SYS_FILE"
 
 # --- Persona da sessão: UMA fonte viva, a do projeto ---
 # Injetada por PROCESSO via --append-system-prompt-file: várias sessões na
@@ -119,7 +152,7 @@ if [ ! -f "$PERSONA" ] && [ -f "$SEED" ]; then
     echo "[myco] persona=$SESSION semeada de $SEED → $PERSONA (edite AQUI; a semente não é mais lida)"
 fi
 if [ -f "$PERSONA" ]; then
-    CLAUDE_ARGS+=("--append-system-prompt-file" "$PERSONA")
+    { printf '\n\n# Persona da sessão %s\n\n' "$SESSION"; cat "$PERSONA"; } >> "$SYS_FILE"
     if [ -f "$SEED" ] && ! cmp -s "$SEED" "$PERSONA"; then
         echo "[myco] persona=$SESSION ← $PERSONA (a semente em $SEED diverge e NÃO é lida)"
     else
@@ -129,13 +162,10 @@ else
     echo "[myco] persona=$SESSION: nenhuma (nem no projeto nem semente)"
 fi
 
-# --- Ensure .claude/settings.json has hooks ---
-SETTINGS_DIR="$PROJECT_DIR/.claude"
-SETTINGS_FILE="$SETTINGS_DIR/settings.json"
-mkdir -p "$SETTINGS_DIR"
+CLAUDE_ARGS+=("--append-system-prompt-file" "$SYS_FILE")
 
-if [ ! -f "$SETTINGS_FILE" ]; then
-    cat > "$SETTINGS_FILE" << ENDJSON
+# --- Hooks por --settings (nada escrito em $PROJECT_DIR/.claude) ---
+cat > "$SETTINGS_FILE" << ENDJSON
 {
   "hooks": {
     "Stop": [
@@ -161,7 +191,13 @@ if [ ! -f "$SETTINGS_FILE" ]; then
   }
 }
 ENDJSON
-    echo "[myco] created hooks → $SETTINGS_FILE"
+CLAUDE_ARGS+=("--settings" "$SETTINGS_FILE")
+
+# Projeto que ainda tem os hooks do myco no .claude/settings.json (versão
+# antiga) dispararia cada hook DUAS vezes → painel e despacho duplicados.
+PROJ_SETTINGS="$PROJECT_DIR/.claude/settings.json"
+if [ -f "$PROJ_SETTINGS" ] && grep -q 'myco_hook.py\|myco_prompt_hook.py' "$PROJ_SETTINGS"; then
+    echo "[myco] AVISO: $PROJ_SETTINGS ainda tem os hooks do myco — remova-os de lá (agora vão por --settings) ou cada hook roda em dobro"
 fi
 
 # --- Export env vars and launch ---
