@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+#
+# myco-fio — roda uma sessão especialista do myco em modo headless, por FIO.
+#
+# Um fio = (SESSAO, assunto). O MAESTRO (ou o humano) manda um prompt para um
+# fio; se o fio já existe, a conversa é RETOMADA (--resume, contexto preservado);
+# se não existe, nasce uma sessão ZERADA com a persona da SESSAO. Assim a
+# especialista guarda o tácito de um assunto sem carregar lixo de outro.
+#
+#   myco-fio <SESSAO> <fio> [project_dir] [--novo] [--model M] [--daemon URL]
+#            [--tenant TOKEN] [-- claude_flags...]  < prompt.md
+#   myco-fio <SESSAO> <fio> ... --prompt "texto"            # prompt inline
+#   myco-fio --lista [SESSAO]                               # fios abertos
+#   myco-fio --fecha <SESSAO> <fio>                         # arquiva o fio
+#
+# Saída: a resposta final da especialista em stdout. Em stderr, uma linha
+# [fio] com id, turnos acumulados, tokens de entrada do último turno e o
+# aviso "fio pesado" quando passar de MYCO_FIO_PESADO tokens (padrão 150000):
+# sinal para fechar e abrir outro mesmo que o assunto continue.
+#
+# Registro: ~/myco/tmp/fios/<SESSAO>/<fio>.json + <fio>.NN.md (cada resposta).
+# Nada é escrito no projeto. Hooks (painel + bloco <myco>) rodam normalmente:
+# os eventos saem em nome da SESSAO, não de quem chamou.
+#
+# Decidir RETOMAR × NOVO é do chamador (ver persona do MAESTRO § Fios). Regra
+# curta: mesmo charter/mesma fatia → retoma; charter novo, repo novo, ou fio
+# pesado → --novo (o nome do fio pode ser o mesmo; o antigo vai para arquivo).
+#
+set -euo pipefail
+
+MYCO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+FIOS_DIR="$MYCO_DIR/tmp/fios"
+PESADO="${MYCO_FIO_PESADO:-150000}"
+mkdir -p "$FIOS_DIR"
+
+usage() { sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+# --- subcomandos de consulta ---
+if [ "${1:-}" = "--lista" ]; then
+    shift; filtro="${1:-}"
+    python3 - "$FIOS_DIR" "$filtro" <<'PY'
+import json, sys, pathlib, datetime
+root, filtro = pathlib.Path(sys.argv[1]), sys.argv[2].upper()
+rows = []
+for f in sorted(root.glob("*/*.json")):
+    if filtro and f.parent.name != filtro: continue
+    d = json.loads(f.read_text())
+    rows.append((f.parent.name, f.stem, d.get("turns", 0), d.get("last_input_tokens", 0),
+                 d.get("last_run", "")[:16], d["session_id"]))
+if not rows: print("nenhum fio aberto"); sys.exit(0)
+print(f"{'SESSAO':<10} {'FIO':<32} {'TURNOS':>6} {'TOK.ENTRADA':>11}  {'ÚLTIMA':<16} SESSION_ID")
+for r in rows: print(f"{r[0]:<10} {r[1]:<32} {r[2]:>6} {r[3]:>11}  {r[4]:<16} {r[5]}")
+PY
+    exit 0
+fi
+if [ "${1:-}" = "--fecha" ]; then
+    [ $# -ge 3 ] || usage
+    S="$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')"; F="$3"
+    d="$FIOS_DIR/$S"; [ -f "$d/$F.json" ] || { echo "[fio] $S/$F não existe" >&2; exit 1; }
+    mkdir -p "$d/arquivo"; ts="$(date +%Y%m%d-%H%M%S)"
+    for x in "$d/$F".*; do mv "$x" "$d/arquivo/$(basename "$x").$ts"; done
+    echo "[fio] $S/$F arquivado em $d/arquivo/ (*.${ts})" >&2
+    exit 0
+fi
+
+[ $# -ge 2 ] || usage
+SESSION="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"; shift
+FIO="$1"; shift
+case "$FIO" in *[!A-Za-z0-9._-]*) echo "error: nome de fio só com [A-Za-z0-9._-]" >&2; exit 2;; esac
+
+PROJECT_DIR=""; NOVO=false; MODEL=""; DAEMON=(); TENANT=(); PROMPT=""; EXTRA=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --novo) NOVO=true; shift ;;
+        --model) MODEL="$2"; shift 2 ;;
+        --daemon) DAEMON=(--daemon "$2"); shift 2 ;;
+        --tenant|--channel) TENANT=(--tenant "$2"); shift 2 ;;
+        --prompt) PROMPT="$2"; shift 2 ;;
+        --prompt-file) PROMPT="$(cat "$2")"; shift 2 ;;
+        --) shift; EXTRA=("$@"); break ;;
+        *) if [ -z "$PROJECT_DIR" ] && [ -d "$1" ]; then PROJECT_DIR="$1"; else EXTRA+=("$1"); fi; shift ;;
+    esac
+done
+PROJECT_DIR="${PROJECT_DIR:-.}"
+if [ -z "$PROMPT" ]; then
+    [ -t 0 ] && { echo "error: prompt por stdin, --prompt ou --prompt-file" >&2; exit 2; }
+    PROMPT="$(cat)"
+fi
+[ -n "$PROMPT" ] || { echo "error: prompt vazio" >&2; exit 2; }
+
+# --- registro do fio ---
+REG_DIR="$FIOS_DIR/$SESSION"; mkdir -p "$REG_DIR"
+REG="$REG_DIR/$FIO.json"
+if [ -f "$REG" ] && [ "$NOVO" = true ]; then
+    mkdir -p "$REG_DIR/arquivo"; ts="$(date +%Y%m%d-%H%M%S)"
+    for x in "$REG_DIR/$FIO".*; do mv "$x" "$REG_DIR/arquivo/$(basename "$x").$ts"; done
+    echo "[fio] $SESSION/$FIO: fio anterior arquivado (--novo)" >&2
+fi
+
+if [ -f "$REG" ]; then
+    SID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_id"])' "$REG")"
+    MODO="retoma"; SESS_FLAGS=(--resume "$SID")
+else
+    SID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    MODO="novo"; SESS_FLAGS=(--session-id "$SID")
+fi
+
+# Em retomada o modelo é o da sessão original, salvo pedido explícito.
+MODEL_FLAGS=(); [ -n "$MODEL" ] && MODEL_FLAGS=(--model "$MODEL")
+
+echo "[fio] $SESSION/$FIO $MODO sid=$SID" >&2
+OUT="$(cd "$PROJECT_DIR" && "$MYCO_DIR/myco" "$SESSION" "$PROJECT_DIR" "${DAEMON[@]}" "${TENANT[@]}" -- \
+        -p "$PROMPT" --output-format json --dangerously-skip-permissions \
+        "${SESS_FLAGS[@]}" "${MODEL_FLAGS[@]}" "${EXTRA[@]}" < /dev/null 2>"$REG_DIR/$FIO.stderr" \
+      | python3 -c 'import sys; lines=sys.stdin.read().strip().splitlines(); print(lines[-1] if lines else "{}")')" || true
+
+python3 - "$REG" "$OUT" "$SESSION" "$FIO" "$SID" "$PROJECT_DIR" "$PESADO" "$MODO" <<'PY'
+import json, sys, pathlib, datetime
+reg, raw, session, fio, sid, project, pesado, modo = sys.argv[1:9]
+reg = pathlib.Path(reg); pesado = int(pesado)
+try: d = json.loads(raw)
+except Exception: d = {}
+if not d or d.get("type") != "result":
+    err = (reg.parent / f"{fio}.stderr").read_text()[-1500:]
+    print(f"[fio] FALHA: sem resultado JSON do claude.\n{err}", file=sys.stderr); sys.exit(1)
+meta = json.loads(reg.read_text()) if reg.exists() else {
+    "session": session, "fio": fio, "session_id": sid, "project": str(pathlib.Path(project).resolve()),
+    "created": datetime.datetime.now().isoformat(timespec="seconds"), "turns": 0, "runs": 0}
+usage = d.get("usage") or {}
+inp = (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+       + usage.get("cache_creation_input_tokens", 0))
+meta.update(last_run=datetime.datetime.now().isoformat(timespec="seconds"),
+            turns=meta.get("turns", 0) + int(d.get("num_turns", 0)),
+            runs=meta.get("runs", 0) + 1,
+            last_input_tokens=inp,
+            cost_usd=round(meta.get("cost_usd", 0) + float(d.get("total_cost_usd", 0) or 0), 4),
+            session_id=d.get("session_id", sid))
+reg.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+texto = d.get("result") or ""
+(reg.parent / f"{fio}.{meta['runs']:02d}.md").write_text(texto)
+aviso = "  ⚠ FIO PESADO: feche e abra --novo" if inp >= pesado else ""
+print(f"[fio] {session}/{fio} {modo} ok · rodadas={meta['runs']} turnos={meta['turns']} "
+      f"tok.entrada={inp} custo=${meta['cost_usd']} sid={meta['session_id']}{aviso}", file=sys.stderr)
+print(texto)
+PY

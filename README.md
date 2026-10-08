@@ -159,6 +159,8 @@ The `myco` script in the repo root automates the full session setup:
 What it does:
 - Passes `CLAUDE.md` (the protocol instructions) plus the session persona via `--append-system-prompt-file`
 - Passes the hooks via `--settings` — nothing is written into the target project; its own `CLAUDE.md`/`AGENTS.md` loads natively
+
+`./myco-fio <SESSION> <thread> [dir] [--novo] --prompt-file charter.md` runs a specialist session headless (`-p`) by **thread**: same (SESSION, thread) resumes the conversation, `--novo` starts a fresh one; `--lista` / `--fecha` manage threads. Registry in `tmp/fios/`. Meant for a director session delegating long flows.
 - Exports `MYCO_SESSION`, `MYCO_URL`, `MYCO_INJECT_VIEW`
 - Runs `claude` in the project directory
 

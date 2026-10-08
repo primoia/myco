@@ -99,6 +99,8 @@ O script `myco` na raiz do repo automatiza todo o setup de uma sessão:
 O que ele faz:
 - Passa `CLAUDE.md` (instruções do protocolo) mais a persona da sessão via `--append-system-prompt-file`
 - Passa os hooks via `--settings` — nada é escrito no projeto alvo; o `CLAUDE.md`/`AGENTS.md` dele carrega nativamente
+
+`./myco-fio <SESSAO> <fio> [pasta] [--novo] --prompt-file charter.md` roda uma sessão especialista headless (`-p`) por **fio**: mesmo (SESSAO, fio) retoma a conversa, `--novo` zera; `--lista` / `--fecha` administram. Registro em `tmp/fios/`. Feito para a sessão diretora delegar fluxos longos.
 - Exporta `MYCO_SESSION`, `MYCO_URL`, `MYCO_INJECT_VIEW`
 - Executa `claude` no diretório do projeto
 
